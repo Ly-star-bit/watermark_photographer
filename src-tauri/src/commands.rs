@@ -61,38 +61,6 @@ pub async fn export_batch(app: AppHandle, args: ExportBatchArgs) -> Result<Batch
             "输入照片列表为空".to_string(),
         ));
     }
-    eprintln!("========== [export_batch] 开始 ==========");
-    eprintln!(
-        "[export_batch] 输入 {} 张，输出目录={}",
-        args.input_paths.len(),
-        args.output_dir
-    );
-    eprintln!("[export_batch] 水印路径={}", args.watermark_path);
-    eprintln!(
-        "[export_batch] config: position={:?} size_ratio={} opacity={} margin=({},{})",
-        args.config.position,
-        args.config.size_ratio,
-        args.config.opacity,
-        args.config.margin_x,
-        args.config.margin_y
-    );
-    match &args.config.exif_text {
-        Some(etc) => eprintln!(
-            "[export_batch] exif_text: enabled={} template={:?} custom_text={:?} font_size_ratio={} position={:?} margin=({},{}) opacity={} color={:?} background={:?}",
-            etc.enabled, etc.template, etc.custom_text,
-            etc.font_size_ratio, etc.position,
-            etc.margin_x, etc.margin_y, etc.opacity,
-            etc.color, etc.background
-        ),
-        None => eprintln!("[export_batch] exif_text=None（前端未传或为 null）"),
-    }
-    eprintln!(
-        "[export_batch] export_options: max_long_side={:?} quality={} format={:?}",
-        args.export_options.max_long_side,
-        args.export_options.quality,
-        args.export_options.format
-    );
-    eprintln!("[export_batch] filename_template={:?}", args.filename_template);
     args.config.validate()?;
 
     // 预读水印 PNG（一次 IO，共享给所有 worker）
@@ -198,6 +166,34 @@ pub fn preview_exif_text(
         crate::exif_text::format_template(&template, &tags)
     };
     Ok(ExifTextPreview { text })
+}
+
+// —— 相框参数条预览 ——————————————————————————————————————
+// 前端 Canvas 预览需要知道相框底部参数条的左右两行文本 + 品牌名，
+// 此命令从照片文件中提取 EXIF、套用模板后返回，供前端按已知比例排版。
+
+#[derive(Debug, Serialize)]
+pub struct FramePreview {
+    pub left: Vec<String>,
+    pub right: Vec<String>,
+    pub brand: String,
+}
+
+#[tauri::command]
+pub fn preview_frame(path: String, config: crate::frame::FrameConfig) -> Result<FramePreview> {
+    let src_bytes = std::fs::read(&path)?;
+    let meta = crate::metadata::extract(&src_bytes)
+        .unwrap_or_else(|_| crate::metadata::Metadata::empty());
+    let tags = match &meta.exif {
+        Some(raw) => crate::exif_text::parse_exif(raw.as_ref()),
+        None => std::collections::HashMap::new(),
+    };
+    let texts = crate::frame::resolve_texts(&config, &tags);
+    Ok(FramePreview {
+        left: texts.left,
+        right: texts.right,
+        brand: texts.brand,
+    })
 }
 
 // —— 缩略图 ————————————————————————————————————————————

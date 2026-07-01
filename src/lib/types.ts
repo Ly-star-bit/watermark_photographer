@@ -36,6 +36,47 @@ export interface ExifTextConfig {
   background: [number, number, number, number] | null;
 }
 
+export interface FrameConfig {
+  enabled: boolean;
+  /** 边框颜色 [R,G,B]，默认接近白 [250,250,250] */
+  border_color: [number, number, number];
+  /** 边框宽度（相对图片短边比例），上/左/右三边等宽 */
+  border_ratio: number;
+  /** 底部参数条高度（相对短边比例） */
+  bottom_bar_ratio: number;
+  /** 参数条主文字颜色 */
+  text_color: [number, number, number];
+  /** 参数条副文字颜色（第二行、稍暗） */
+  subtext_color: [number, number, number];
+  /** 左块两行模板，支持 {model} {lens} 等占位符 */
+  left_lines: string[];
+  /** 右块两行模板，支持 {focal} {fnumber} {shutter} {iso} {date} 等占位符 */
+  right_lines: string[];
+  /** 中央品牌名模板，{brand} 会从 EXIF Make 自动归一化 */
+  brand_template: string;
+  /** 是否显示中央品牌名 */
+  show_brand: boolean;
+  /** 主文字字号（相对参数条高度） */
+  font_size_ratio: number;
+  /** 品牌名字号（相对参数条高度） */
+  brand_size_ratio: number;
+}
+
+export const DEFAULT_FRAME: FrameConfig = {
+  enabled: false,
+  border_color: [250, 250, 250],
+  border_ratio: 0.02,
+  bottom_bar_ratio: 0.12,
+  text_color: [30, 30, 30],
+  subtext_color: [110, 110, 110],
+  left_lines: ["{model}", "{lens}"],
+  right_lines: ["{focal}  f/{fnumber}  {shutter}s  ISO {iso}", "{date}"],
+  brand_template: "{brand}",
+  show_brand: true,
+  font_size_ratio: 0.22,
+  brand_size_ratio: 0.42,
+};
+
 export interface WatermarkConfig {
   position: GridPosition;
   size_ratio: number;         // 0.01 - 1.0
@@ -47,6 +88,8 @@ export interface WatermarkConfig {
   tint: [number, number, number] | null;
   /** 可选：EXIF 文字水印配置 */
   exif_text: ExifTextConfig | null;
+  /** 可选：相框模式（白/黑边框 + 底部参数条） */
+  frame: FrameConfig | null;
 }
 
 /** 支持的图片输入格式扩展名（小写） */
@@ -85,6 +128,7 @@ export const DEFAULT_CONFIG: WatermarkConfig = {
   landscape_override: null,
   tint: null,
   exif_text: null,
+  frame: null,
 };
 
 /** 输出格式 */

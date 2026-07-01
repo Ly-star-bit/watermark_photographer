@@ -1,8 +1,8 @@
 import { useRef, useState } from "react";
-import { FileImage, Image, Type, X } from "lucide-react";
+import { FileImage, Frame, Image, Type, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { GridPosition, WatermarkConfig } from "@/lib/types";
-import { DEFAULT_EXIF_TEXT, GRID_POSITIONS, hexToRgb, rgbToHex } from "@/lib/types";
+import { DEFAULT_EXIF_TEXT, DEFAULT_FRAME, GRID_POSITIONS, hexToRgb, rgbToHex } from "@/lib/types";
 import { pickPngFile, basename } from "@/lib/api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -13,11 +13,12 @@ interface Props {
   onConfigChange: (patch: Partial<WatermarkConfig>) => void;
 }
 
-type TabId = "image" | "text";
+type TabId = "image" | "text" | "frame";
 
 const TABS: { id: TabId; label: string; icon: typeof Image }[] = [
   { id: "image", label: "图片水印", icon: Image },
   { id: "text", label: "文字水印", icon: Type },
+  { id: "frame", label: "相框", icon: Frame },
 ];
 
 export function WatermarkPanel({
@@ -57,8 +58,10 @@ export function WatermarkPanel({
           config={config}
           onConfigChange={onConfigChange}
         />
-      ) : (
+      ) : tab === "text" ? (
         <TextTab config={config} onConfigChange={onConfigChange} />
+      ) : (
+        <FrameTab config={config} onConfigChange={onConfigChange} />
       )}
     </div>
   );
@@ -365,6 +368,185 @@ function TextTab({
   );
 }
 
+// —— 相框 Tab ————————————————————————————————————————————
+
+function FrameTab({
+  config,
+  onConfigChange,
+}: {
+  config: WatermarkConfig;
+  onConfigChange: (patch: Partial<WatermarkConfig>) => void;
+}) {
+  const enabled = config.frame?.enabled ?? false;
+  const cfg = config.frame ?? DEFAULT_FRAME;
+
+  return (
+    <div className="space-y-6">
+      {/* 启用开关 */}
+      <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-3">
+        <div>
+          <div className="text-xs font-medium">相框模式</div>
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            白/黑边框 + 底部参数条（型号、镜头、光圈快门ISO、焦距）
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => onConfigChange({ frame: { ...cfg, enabled: !enabled } })}
+          className={cn(
+            "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+            enabled ? "bg-primary" : "bg-muted-foreground/30",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+              enabled ? "translate-x-5" : "translate-x-1",
+            )}
+          />
+        </button>
+      </div>
+
+      {enabled && (
+        <>
+          <Section title="边框颜色" hint={rgbToHex(cfg.border_color).toUpperCase()}>
+            <ColorPicker
+              tint={cfg.border_color}
+              onChange={(t) =>
+                onConfigChange({ frame: { ...cfg, border_color: t ?? cfg.border_color } })
+              }
+              allowOriginal={false}
+            />
+          </Section>
+
+          <Section title="边框宽度" hint={`${(cfg.border_ratio * 100).toFixed(1)}%`}>
+            <Slider
+              min={0.005}
+              max={0.06}
+              step={0.001}
+              value={cfg.border_ratio}
+              onChange={(v) => onConfigChange({ frame: { ...cfg, border_ratio: v } })}
+            />
+          </Section>
+
+          <Section title="参数条高度" hint={`${(cfg.bottom_bar_ratio * 100).toFixed(0)}%`}>
+            <Slider
+              min={0.06}
+              max={0.25}
+              step={0.005}
+              value={cfg.bottom_bar_ratio}
+              onChange={(v) => onConfigChange({ frame: { ...cfg, bottom_bar_ratio: v } })}
+            />
+          </Section>
+
+          <Section title="文字字号" hint={`${(cfg.font_size_ratio * 100).toFixed(0)}%`}>
+            <Slider
+              min={0.1}
+              max={0.4}
+              step={0.01}
+              value={cfg.font_size_ratio}
+              onChange={(v) => onConfigChange({ frame: { ...cfg, font_size_ratio: v } })}
+            />
+          </Section>
+
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              左侧两行模板
+            </label>
+            {[0, 1].map((i) => (
+              <input
+                key={i}
+                type="text"
+                value={cfg.left_lines[i] ?? ""}
+                onChange={(e) => {
+                  const next = [...cfg.left_lines];
+                  next[i] = e.target.value;
+                  onConfigChange({ frame: { ...cfg, left_lines: next } });
+                }}
+                className="h-8 w-full rounded-md border border-border/60 bg-card/40 px-2.5 text-[11px] text-foreground focus:border-primary/60 focus:outline-none font-mono"
+              />
+            ))}
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              右侧两行模板
+            </label>
+            {[0, 1].map((i) => (
+              <input
+                key={i}
+                type="text"
+                value={cfg.right_lines[i] ?? ""}
+                onChange={(e) => {
+                  const next = [...cfg.right_lines];
+                  next[i] = e.target.value;
+                  onConfigChange({ frame: { ...cfg, right_lines: next } });
+                }}
+                className="h-8 w-full rounded-md border border-border/60 bg-card/40 px-2.5 text-[11px] text-foreground focus:border-primary/60 focus:outline-none font-mono"
+              />
+            ))}
+            <p className="text-[10px] text-muted-foreground/60">
+              {"{model} {lens} {focal} {fnumber} {shutter} {iso} {date}"}
+            </p>
+          </div>
+
+          {/* 品牌名 */}
+          <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-2.5">
+            <span className="text-[11px] text-muted-foreground">中央品牌名</span>
+            <button
+              type="button"
+              onClick={() => onConfigChange({ frame: { ...cfg, show_brand: !cfg.show_brand } })}
+              className={cn(
+                "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+                cfg.show_brand ? "bg-primary" : "bg-muted-foreground/30",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+                  cfg.show_brand ? "translate-x-5" : "translate-x-1",
+                )}
+              />
+            </button>
+          </div>
+
+          {cfg.show_brand && (
+            <Section title="品牌字号" hint={`${(cfg.brand_size_ratio * 100).toFixed(0)}%`}>
+              <Slider
+                min={0.15}
+                max={0.6}
+                step={0.01}
+                value={cfg.brand_size_ratio}
+                onChange={(v) => onConfigChange({ frame: { ...cfg, brand_size_ratio: v } })}
+              />
+            </Section>
+          )}
+
+          <Section title="主文字颜色" hint={rgbToHex(cfg.text_color).toUpperCase()}>
+            <ColorPicker
+              tint={cfg.text_color}
+              onChange={(t) =>
+                onConfigChange({ frame: { ...cfg, text_color: t ?? cfg.text_color } })
+              }
+              allowOriginal={false}
+            />
+          </Section>
+
+          <Section title="副文字颜色" hint={rgbToHex(cfg.subtext_color).toUpperCase()}>
+            <ColorPicker
+              tint={cfg.subtext_color}
+              onChange={(t) =>
+                onConfigChange({ frame: { ...cfg, subtext_color: t ?? cfg.subtext_color } })
+              }
+              allowOriginal={false}
+            />
+          </Section>
+        </>
+      )}
+    </div>
+  );
+}
+
 // —— 公共组件 ——————————————————————————————————————————
 
 function Section({
@@ -501,9 +683,12 @@ const PRESET_COLORS: Array<{ label: string; rgb: [number, number, number] }> = [
 function ColorPicker({
   tint,
   onChange,
+  allowOriginal = true,
 }: {
   tint: [number, number, number] | null;
   onChange: (t: [number, number, number] | null) => void;
+  /** 是否显示「原色」选项（对水印着色适用；边框色/文字色等纯色场景应设为 false） */
+  allowOriginal?: boolean;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const currentHex = tint ? rgbToHex(tint) : "#ffffff";
@@ -520,27 +705,29 @@ function ColorPicker({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        <button
-          type="button"
-          onClick={() => onChange(null)}
-          title="使用签名原色"
-          className={cn(
-            "relative h-7 w-7 shrink-0 overflow-hidden rounded border transition",
-            "bg-[repeating-conic-gradient(#444_0%_25%,#222_0%_50%)] bg-[length:8px_8px]",
-            tint === null
-              ? "border-primary ring-1 ring-primary/60"
-              : "border-border/50 hover:border-primary/60",
-          )}
-        >
-          <span
+        {allowOriginal && (
+          <button
+            type="button"
+            onClick={() => onChange(null)}
+            title="使用签名原色"
             className={cn(
-              "absolute inset-0 flex items-center justify-center text-[9px] font-medium",
-              tint === null ? "text-primary" : "text-muted-foreground",
+              "relative h-7 w-7 shrink-0 overflow-hidden rounded border transition",
+              "bg-[repeating-conic-gradient(#444_0%_25%,#222_0%_50%)] bg-[length:8px_8px]",
+              tint === null
+                ? "border-primary ring-1 ring-primary/60"
+                : "border-border/50 hover:border-primary/60",
             )}
           >
-            原
-          </span>
-        </button>
+            <span
+              className={cn(
+                "absolute inset-0 flex items-center justify-center text-[9px] font-medium",
+                tint === null ? "text-primary" : "text-muted-foreground",
+              )}
+            >
+              原
+            </span>
+          </button>
+        )}
 
         {PRESET_COLORS.map((c) => (
           <button

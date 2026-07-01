@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::exif_text::ExifTextConfig;
+use crate::frame::FrameConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -47,6 +48,9 @@ pub struct WatermarkConfig {
     /// 可选：EXIF 文字水印配置
     #[serde(default)]
     pub exif_text: Option<ExifTextConfig>,
+    /// 可选：相框模式（白/黑边框 + 底部参数条）
+    #[serde(default)]
+    pub frame: Option<FrameConfig>,
 }
 
 impl WatermarkConfig {
@@ -152,6 +156,7 @@ mod tests {
             landscape_override: None,
             tint: None,
             exif_text: None,
+            frame: None,
         }
     }
 

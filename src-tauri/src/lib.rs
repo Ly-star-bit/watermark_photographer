@@ -10,6 +10,7 @@ mod batch;
 mod preset;
 mod export;
 mod exif_text;
+mod frame;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -24,7 +25,8 @@ pub fn run() {
             commands::save_preset,
             commands::delete_preset,
             commands::create_thumbnail,
-            commands::preview_exif_text
+            commands::preview_exif_text,
+            commands::preview_frame
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

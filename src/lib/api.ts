@@ -7,7 +7,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { SUPPORTED_INPUT_EXTS, type PhotoFile, type WatermarkConfig, type ExportOptions } from "./types";
+import { SUPPORTED_INPUT_EXTS, type PhotoFile, type WatermarkConfig, type ExportOptions, type FrameConfig } from "./types";
 
 /** 判断文件扩展名是否为支持的输入图片格式（JPEG/PNG/TIFF/WebP/BMP） */
 export function isSupportedImagePath(path: string): boolean {
@@ -183,4 +183,15 @@ export async function previewExifText(
     customText,
   });
   return result.text;
+}
+
+/** 获取相框参数条的预览文本（左/右两行 + 品牌名，均已套用模板+EXIF解析） */
+export async function previewFrame(
+  path: string,
+  config: FrameConfig,
+): Promise<{ left: string[]; right: string[]; brand: string }> {
+  return invoke<{ left: string[]; right: string[]; brand: string }>("preview_frame", {
+    path,
+    config,
+  });
 }

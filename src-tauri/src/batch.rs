@@ -105,49 +105,25 @@ fn do_one(
     filename_template: &str,
     seq: usize,
 ) -> Result<PathBuf> {
-    eprintln!("---------- [do_one] 处理 {} ----------", src.display());
     let src_bytes = std::fs::read(src)?;
-    eprintln!("[do_one] 源文件字节数={}", src_bytes.len());
 
     // 1. 合成（含签名水印 + 可选 EXIF 文字）
     let exif_text_cfg = config.exif_text.as_ref();
-    eprintln!(
-        "[do_one] exif_text_cfg 传入 compose: {}",
-        if exif_text_cfg.is_some() { "Some(..)" } else { "None" }
-    );
     let (composed, meta) = watermark::compose(&src_bytes, wm, config, exif_text_cfg, font)?;
-    eprintln!(
-        "[do_one] compose 完成，composed={}x{} meta.exif={} meta.icc={}",
-        composed.width(),
-        composed.height(),
-        meta.exif.is_some(),
-        meta.icc.is_some()
-    );
 
     // 2. 可选缩图（长边限制）
     let final_img = if let Some(resized) = watermark::maybe_resize(&composed, export_opts.max_long_side) {
-        eprintln!(
-            "[do_one] maybe_resize 触发：{}x{} → {}x{}",
-            composed.width(), composed.height(), resized.width(), resized.height()
-        );
         resized
     } else {
-        eprintln!("[do_one] maybe_resize 未触发（max_long_side={:?}）", export_opts.max_long_side);
         composed
     };
 
     // 3. 编码
     let encoded = encode_final(&final_img, export_opts)?;
-    eprintln!(
-        "[do_one] 编码完成 format={:?} quality={} 字节数={}",
-        export_opts.format, export_opts.quality, encoded.len()
-    );
 
     // 4. 回注 EXIF/ICC（仅 JPEG 输出；PNG/WebP 的元数据处理由 image crate 内部完成）
     let final_bytes = if export_opts.format == OutputFormat::Jpeg {
-        let injected = crate::metadata::inject(encoded, &meta)?;
-        eprintln!("[do_one] EXIF/ICC 回注后字节数={}", injected.len());
-        injected
+        crate::metadata::inject(encoded, &meta)?
     } else {
         encoded
     };
@@ -163,7 +139,6 @@ fn do_one(
 
     // 6. 写入
     std::fs::write(&out_path, final_bytes)?;
-    eprintln!("[do_one] ✅ 写入 {}", out_path.display());
     Ok(out_path)
 }
 
@@ -291,6 +266,7 @@ mod tests {
             landscape_override: None,
             tint: None,
             exif_text: None,
+            frame: None,
         }
     }
 
@@ -358,6 +334,7 @@ mod tests {
                 landscape_override: None,
                 tint: None,
                 exif_text: None,
+                frame: None,
             },
             export_options: default_export_opts(),
             filename_template: "{stem}_wm".to_string(),

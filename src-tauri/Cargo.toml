@@ -32,6 +32,10 @@ thiserror = "2"
 kamadak-exif = "0.6"
 # 纯 CPU 文字渲染到 RGBA 像素（无 GPU 依赖）
 ab_glyph = "0.2"
+# 图像处理算法：旋转、膨胀（描边）、高斯模糊（阴影）
+imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
+# EXIF 读写（版权字段 Artist/Copyright 写入 JPEG）
+little_exif = "0.6"
 
 [dev-dependencies]
 tempfile = "3"

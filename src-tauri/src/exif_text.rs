@@ -321,23 +321,7 @@ pub fn render(
     let long_side = img_w.max(img_h) as f32;
     let font_px = (long_side * config.font_size_ratio).max(8.0);
 
-    // 调试输出（正式版可删）
-    eprintln!(
-        "[exif_text] img={}x{} ratio={:.4} font_px={:.1} text={:?}",
-        img_w, img_h, config.font_size_ratio, font_px, text
-    );
-
-    let result = render_text(&text, config, font_px, font)?;
-    if let Some(ref rendered) = result {
-        eprintln!(
-            "[exif_text] rendered text_img={}x{}",
-            rendered.width(),
-            rendered.height()
-        );
-    } else {
-        eprintln!("[exif_text] render_text returned None");
-    }
-    Ok(result)
+    render_text(&text, config, font_px, font)
 }
 
 /// 纯文字渲染（不含 EXIF 解析逻辑）
@@ -356,23 +340,14 @@ fn render_text(
 
     // 计算总宽度和总高度
     let mut max_w = 0u32;
-    let mut sample_advance = 0.0f32;
     for line in &lines {
         let mut w = 0f32;
         for c in line.chars() {
             let gid = font.glyph_id(c);
-            let adv = scaled_font.h_advance(gid);
-            if sample_advance == 0.0 {
-                sample_advance = adv;
-            }
-            w += adv;
+            w += scaled_font.h_advance(gid);
         }
         max_w = max_w.max(w.ceil() as u32);
     }
-    eprintln!(
-        "[exif_text] render_text: font_px={:.1} line_height={} ascent={} max_w={} sample_advance={:.2}",
-        font_px, line_height, ascent, max_w, sample_advance
-    );
 
     let padding = if config.background.is_some() {
         (font_px * 0.3).ceil() as u32
@@ -396,61 +371,38 @@ fn render_text(
     }
 
     // 逐行逐字渲染
-    let mut chars_total = 0usize;
-    let mut chars_outlined = 0usize;
-    let mut pixels_drawn = 0usize;
-    let mut pixels_skipped_oob = 0usize;
-    let mut max_coverage: f32 = 0.0;
-    let mut max_alpha: u8 = 0;
     for (li, line) in lines.iter().enumerate() {
         let mut x_cursor = padding as f32;
         let y = padding as f32 + ascent as f32 + (li as f32 * line_height as f32);
 
         for c in line.chars() {
-            chars_total += 1;
             let gid = font.glyph_id(c);
             let glyph = gid.with_scale_and_position(scale, point(x_cursor, y));
 
             if let Some(outlined) = font.outline_glyph(glyph) {
-                chars_outlined += 1;
+                // ⚠️ ab_glyph 的 OutlinedGlyph::draw 回调坐标是 glyph 局部（0..bounds_w, 0..bounds_h），
+                // 必须加上 px_bounds.min 才是画布绝对坐标。否则所有字符都画到画布左上角同一位置。
                 let bb = outlined.px_bounds();
-                // ⚠️ 关键：outlined.draw 回调收到的是 glyph 局部坐标（0..bounds_w, 0..bounds_h），
-                // 必须加上 px_bounds.min 才是画布坐标。否则每个字都会画到画布左上角同一位置。
                 let offset_x = bb.min.x as i32;
                 let offset_y = bb.min.y as i32;
-                if chars_total <= 3 {
-                    eprintln!(
-                        "[render_text] char {:?} gid={:?} x_cursor={:.1} y={:.1} px_bounds=({:.1},{:.1})-({:.1},{:.1}) offset=({},{})",
-                        c, gid, x_cursor, y, bb.min.x, bb.min.y, bb.max.x, bb.max.y, offset_x, offset_y
-                    );
-                }
                 outlined.draw(|px, py, coverage| {
-                    if coverage > max_coverage {
-                        max_coverage = coverage;
-                    }
-                    // 把 glyph 局部坐标 (px, py) 转成画布绝对坐标
+                    // 局部坐标 → 画布绝对坐标
                     let ax = px as i32 + offset_x;
                     let ay = py as i32 + offset_y;
                     if ax < 0 || ay < 0 {
-                        pixels_skipped_oob += 1;
                         return;
                     }
                     let ix = ax as u32;
                     let iy = ay as u32;
                     if ix >= total_w || iy >= total_h {
-                        pixels_skipped_oob += 1;
                         return;
                     }
                     let src_a = coverage * config.opacity; // 0..1
                     if src_a <= 0.0 {
                         return;
                     }
-                    let alpha_u8 = (src_a * 255.0) as u8;
-                    if alpha_u8 > max_alpha {
-                        max_alpha = alpha_u8;
-                    }
-                    // 正确的 source-over：文字覆盖到已有背景（含半透明背景条）上
-                    // out_rgb = src_rgb * src_a + dst_rgb * dst_a * (1 - src_a) / out_a
+                    // 标准 source-over 合成：文字覆盖到已有背景（含半透明背景条）上
+                    // out_rgb = (src_rgb * src_a + dst_rgb * dst_a * (1 - src_a)) / out_a
                     // out_a   = src_a + dst_a * (1 - src_a)
                     let pixel = img.get_pixel_mut(ix, iy);
                     let dst_a = pixel[3] as f32 / 255.0;
@@ -469,22 +421,12 @@ fn render_text(
                     pixel[1] = ((src_g * src_a + dst_g * dst_a * inv_src) / out_a) as u8;
                     pixel[2] = ((src_b * src_a + dst_b * dst_a * inv_src) / out_a) as u8;
                     pixel[3] = (out_a * 255.0) as u8;
-                    pixels_drawn += 1;
                 });
             }
 
             x_cursor += scaled_font.h_advance(gid);
         }
     }
-    eprintln!(
-        "[render_text] chars_total={} chars_outlined={} pixels_drawn={} pixels_skipped_oob={} max_coverage={:.3} max_alpha={}",
-        chars_total, chars_outlined, pixels_drawn, pixels_skipped_oob, max_coverage, max_alpha
-    );
-
-    // 调试：把文字位图单独存盘，绕过合成看纯渲染结果
-    let dbg_path = std::env::temp_dir().join("watermark_text_debug.png");
-    let _ = img.save(&dbg_path);
-    eprintln!("[render_text] 已保存文字位图到 {}", dbg_path.display());
 
     Ok(Some(img))
 }

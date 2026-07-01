@@ -1,8 +1,22 @@
 import { useEffect, useRef, useState } from "react";
 import { Aperture, Loader2 } from "lucide-react";
 import { computePosition, targetWatermarkWidth } from "@/lib/preview";
-import { previewExifText } from "@/lib/api";
+import { previewExifText, previewFrame } from "@/lib/api";
 import type { PhotoFile, WatermarkConfig } from "@/lib/types";
+
+/** 相框参数条预览文本（左/右两行 + 品牌名） */
+interface FrameTexts {
+  left: string[];
+  right: string[];
+  brand: string;
+}
+
+const EMPTY_FRAME_TEXTS: FrameTexts = { left: [], right: [], brand: "" };
+
+/** 把颜色按因子（0..1）压暗，与 Rust frame::darken 语义一致 */
+function darkenColor(c: [number, number, number], factor: number): string {
+  return `rgb(${Math.round(c[0] * factor)},${Math.round(c[1] * factor)},${Math.round(c[2] * factor)})`;
+}
 
 /**
  * 生成着色后的水印离屏 canvas。
@@ -68,6 +82,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
   const [baseImg, setBaseImg] = useState<LoadedImage | null>(null);
   const [wmImg, setWmImg] = useState<LoadedImage | null>(null);
   const [exifText, setExifText] = useState<string>("");
+  const [frameTexts, setFrameTexts] = useState<FrameTexts>(EMPTY_FRAME_TEXTS);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -153,6 +168,33 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     };
   }, [photo, config.exif_text?.enabled, config.exif_text?.template, config.exif_text?.custom_text]);
 
+  // 获取相框参数条预览文本（异步从 Rust 获取，套用模板 + 品牌归一化）
+  useEffect(() => {
+    if (!photo || !config.frame?.enabled) {
+      setFrameTexts(EMPTY_FRAME_TEXTS);
+      return;
+    }
+    const fc = config.frame;
+    let cancelled = false;
+    previewFrame(photo.path, fc)
+      .then((r) => {
+        if (!cancelled) setFrameTexts(r);
+      })
+      .catch(() => {
+        if (!cancelled) setFrameTexts(EMPTY_FRAME_TEXTS);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    photo,
+    config.frame?.enabled,
+    config.frame?.left_lines?.join("|") ?? "",
+    config.frame?.right_lines?.join("|") ?? "",
+    config.frame?.brand_template,
+    config.frame?.show_brand,
+  ]);
+
   // 绘制
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -163,7 +205,19 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     const ch = container.clientHeight;
     if (cw === 0 || ch === 0) return;
 
-    const ratio = baseImg.width / baseImg.height;
+    const pw = baseImg.width;
+    const ph = baseImg.height;
+    const fc = config.frame?.enabled ? config.frame : null;
+
+    // 相框几何（与 Rust frame::apply 同公式）：短边 × ratio 得到边框/参数条宽度。
+    // border/bottomBar 与 photo 共享同一原图像素坐标系，photo 偏移 (border, border)。
+    const short = Math.min(pw, ph);
+    const border = fc ? Math.round(short * fc.border_ratio) : 0;
+    const bottomBar = fc ? Math.round(short * fc.bottom_bar_ratio) : 0;
+    const newW = pw + border * 2;
+    const newH = ph + border + bottomBar;
+
+    const ratio = newW / newH;
     let dw = cw;
     let dh = cw / ratio;
     if (dh > ch) {
@@ -181,31 +235,28 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dw, dh);
 
-    const s = dw / baseImg.width;
+    // 统一缩放系数：原图像素坐标系（含边框/参数条）→ 显示像素。
+    // 未启用相框时 border=0、newW=pw，退化为原有的 s = dw / baseImg.width。
+    const s = dw / newW;
 
-    ctx.drawImage(baseImg.el, 0, 0, dw, dh);
+    if (fc) {
+      ctx.fillStyle = `rgb(${fc.border_color[0]},${fc.border_color[1]},${fc.border_color[2]})`;
+      ctx.fillRect(0, 0, dw, dh);
+    }
 
-    // PNG 签名水印
+    ctx.drawImage(baseImg.el, border * s, border * s, pw * s, ph * s);
+
+    // PNG 签名水印（叠加在照片区内，坐标需加上 border 偏移）
     if (wmImg) {
-      const targetWmW = targetWatermarkWidth(
-        baseImg.width,
-        baseImg.height,
-        config.size_ratio,
-      );
+      const targetWmW = targetWatermarkWidth(pw, ph, config.size_ratio);
       const wmScale = targetWmW / wmImg.width;
       const targetWmH = Math.max(1, Math.round(wmImg.height * wmScale));
 
-      const { x, y } = computePosition(
-        baseImg.width,
-        baseImg.height,
-        targetWmW,
-        targetWmH,
-        config,
-      );
+      const { x, y } = computePosition(pw, ph, targetWmW, targetWmH, config);
 
       const src = tintWatermark(wmImg.el, wmImg.width, wmImg.height, config.tint);
       ctx.globalAlpha = Math.max(0, Math.min(1, config.opacity));
-      ctx.drawImage(src, x * s, y * s, targetWmW * s, targetWmH * s);
+      ctx.drawImage(src, (border + x) * s, (border + y) * s, targetWmW * s, targetWmH * s);
       ctx.globalAlpha = 1;
     }
 
@@ -213,67 +264,113 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     if (exifText && config.exif_text) {
       const etc = config.exif_text;
       // 与 Rust 端保持一致：字号 = 长边 × ratio，下限 8px（原图坐标系）
-      const longSide = Math.max(baseImg.width, baseImg.height);
+      const longSide = Math.max(pw, ph);
       const fontPxImg = Math.max(8, longSide * etc.font_size_ratio);
       const fontSize = fontPxImg * s;
-      if (fontSize < 2) return; // 太小不可见，跳过
+      if (fontSize >= 2) {
+        const fontFamily = "'Source Code Pro', 'Courier New', monospace";
+        ctx.font = `${fontSize}px ${fontFamily}`;
+        ctx.textBaseline = "top";
+        ctx.textAlign = "left";
 
-      const fontFamily = "'Source Code Pro', 'Courier New', monospace";
-      ctx.font = `${fontSize}px ${fontFamily}`;
-      ctx.textBaseline = "top";
+        // 计算文字尺寸
+        const lines = exifText.split("\n");
+        const lineHeight = fontSize * 1.3;
+        let maxW = 0;
+        for (const line of lines) {
+          const m = ctx.measureText(line);
+          if (m.width > maxW) maxW = m.width;
+        }
+        const textW = Math.ceil(maxW);
+        const textH = Math.ceil(lineHeight * lines.length);
 
-      // 计算文字尺寸
-      const lines = exifText.split("\n");
-      const lineHeight = fontSize * 1.3;
-      let maxW = 0;
-      for (const line of lines) {
-        const m = ctx.measureText(line);
-        if (m.width > maxW) maxW = m.width;
-      }
-      const textW = Math.ceil(maxW);
-      const textH = Math.ceil(lineHeight * lines.length);
+        // 内边距（与 Rust padding 对应）
+        const pad = etc.background ? fontSize * 0.3 : 0;
+        const totalW = textW + pad * 2;
+        const totalH = textH + pad * 2;
 
-      // 内边距（与 Rust padding 对应）
-      const pad = etc.background ? fontSize * 0.3 : 0;
-      const totalW = textW + pad * 2;
-      const totalH = textH + pad * 2;
+        // 用 Rust 位置算法计算坐标（照片区内，仍需加 border 偏移）
+        const { x, y } = computePosition(
+          pw,
+          ph,
+          Math.ceil(totalW / s),
+          Math.ceil(totalH / s),
+          {
+            position: etc.position,
+            size_ratio: 0,
+            opacity: etc.opacity,
+            margin_x: etc.margin_x,
+            margin_y: etc.margin_y,
+            landscape_override: null,
+            tint: null,
+            exif_text: null,
+            frame: null,
+          },
+        );
 
-      // 用 Rust 位置算法计算坐标
-      const { x, y } = computePosition(
-        baseImg.width,
-        baseImg.height,
-        Math.ceil(totalW / s),
-        Math.ceil(totalH / s),
-        {
-          position: etc.position,
-          size_ratio: 0,
-          opacity: etc.opacity,
-          margin_x: etc.margin_x,
-          margin_y: etc.margin_y,
-          landscape_override: null,
-          tint: null,
-          exif_text: null,
-        },
-      );
+        const tx = (border + x) * s;
+        const ty = (border + y) * s;
 
-      const tx = x * s;
-      const ty = y * s;
+        // 背景条
+        if (etc.background) {
+          const [br, bg, bb, ba] = etc.background;
+          ctx.fillStyle = `rgba(${br},${bg},${bb},${ba / 255})`;
+          ctx.fillRect(tx, ty, totalW, totalH);
+        }
 
-      // 背景条
-      if (etc.background) {
-        const [br, bg, bb, ba] = etc.background;
-        ctx.fillStyle = `rgba(${br},${bg},${bb},${ba / 255})`;
-        ctx.fillRect(tx, ty, totalW, totalH);
-      }
-
-      // 文字
-      const [cr, cg, cb] = etc.color;
-      ctx.fillStyle = `rgba(${cr},${cg},${cb},${etc.opacity})`;
-      for (let li = 0; li < lines.length; li++) {
-        ctx.fillText(lines[li], tx + pad, ty + pad + li * lineHeight);
+        // 文字
+        const [cr, cg, cb] = etc.color;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${etc.opacity})`;
+        for (let li = 0; li < lines.length; li++) {
+          ctx.fillText(lines[li], tx + pad, ty + pad + li * lineHeight);
+        }
       }
     }
-  }, [baseImg, wmImg, config, exifText]);
+
+    // 相框：顶部分割线 + 底部参数条文本（与 Rust frame::apply 排版公式一致）
+    if (fc) {
+      const barTop = border + ph;
+      const barH = bottomBar;
+      const innerPad = Math.round(barH * 0.15);
+      const mainFontPx = Math.max(barH * fc.font_size_ratio, 10);
+      const brandFontPx = Math.max(barH * fc.brand_size_ratio, 12);
+      const subFontPx = mainFontPx * 0.85;
+      const fontFamily = "'Source Code Pro', 'Courier New', monospace";
+
+      // 顶部分割线
+      const sepThickness = Math.max(barH * 0.015, 1);
+      ctx.fillStyle = darkenColor(fc.border_color, 0.85);
+      ctx.fillRect(border * s, barTop * s, pw * s, sepThickness * s);
+
+      const textBlockH = mainFontPx + subFontPx * 0.2 + subFontPx;
+      const textY0 = barTop + (barH - textBlockH) / 2;
+      const lineYs = [textY0, textY0 + mainFontPx * 1.15];
+
+      ctx.textBaseline = "top";
+      const drawBlock = (lines: string[], anchorX: number, align: CanvasTextAlign) => {
+        ctx.textAlign = align;
+        lines.forEach((line, i) => {
+          const fontPx = i === 0 ? mainFontPx : subFontPx;
+          const color = i === 0 ? fc.text_color : fc.subtext_color;
+          ctx.font = `${fontPx * s}px ${fontFamily}`;
+          ctx.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
+          const y = lineYs[i] ?? lineYs[lineYs.length - 1];
+          ctx.fillText(line, anchorX * s, y * s);
+        });
+      };
+
+      drawBlock(frameTexts.left, border + innerPad, "left");
+      drawBlock(frameTexts.right, newW - border - innerPad, "right");
+
+      if (fc.show_brand && frameTexts.brand) {
+        ctx.textAlign = "center";
+        ctx.font = `${brandFontPx * s}px ${fontFamily}`;
+        ctx.fillStyle = `rgb(${fc.text_color[0]},${fc.text_color[1]},${fc.text_color[2]})`;
+        const cy = barTop + (barH - brandFontPx) / 2;
+        ctx.fillText(frameTexts.brand, (newW / 2) * s, cy * s);
+      }
+    }
+  }, [baseImg, wmImg, config, exifText, frameTexts]);
 
   // 容器 resize 时重绘
   useEffect(() => {

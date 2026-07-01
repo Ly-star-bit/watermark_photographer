@@ -12,7 +12,9 @@
 //   5b. 应用着色(tint)：把非全透明像素 RGB 替换为目标色
 //   6. 计算九宫格坐标 + alpha 合成（签名水印）
 //   7. 可选：叠加 EXIF 文字水印
-//   8. 返回 RgbImage（已展平）+ Metadata
+//   8. 展平为 RgbImage
+//   9. 可选：相框模式（白/黑边框 + 底部 EXIF 参数条），作为最终包装
+//  10. 返回 RgbImage + Metadata
 //
 // 编码已从本模块移除，由 batch.rs 根据用户选择的格式/质量参数完成。
 
@@ -22,6 +24,7 @@ use std::io::Cursor;
 
 use crate::error::Result;
 use crate::exif_text::{self, ExifTextConfig};
+use crate::frame;
 use crate::metadata::{self, Metadata};
 use crate::position::{self, WatermarkConfig};
 
@@ -41,16 +44,10 @@ pub fn compose(
 
     // 1. 提取源元数据（EXIF/ICC）
     let meta = metadata::extract(src_bytes).unwrap_or_else(|_| Metadata::empty());
-    eprintln!(
-        "[compose] metadata 提取 exif={} icc={}",
-        meta.exif.as_ref().map(|b| b.len()).unwrap_or(0),
-        meta.icc.as_ref().map(|b| b.len()).unwrap_or(0),
-    );
 
     // 2. 解码底图（保留原色彩，无 alpha）
     let base = decode_image(src_bytes)?;
     let (img_w, img_h) = base.dimensions();
-    eprintln!("[compose] 底图解码 base={}x{}", img_w, img_h);
 
     // 3-4. 解码 + 缩放水印
     let watermark = prepare_watermark(watermark_png, img_w, img_h, config)?;
@@ -68,10 +65,6 @@ pub fn compose(
     // 6. 计算位置 + 合成底图
     let (x, y) = position::compute_position(img_w, img_h, wm_w, wm_h, config)?;
     let mut canvas = base.to_rgba8();
-    eprintln!(
-        "[compose] PNG 签名水印 {}x{} 叠加于 ({},{})",
-        wm_w, wm_h, x, y
-    );
     image::imageops::overlay(&mut canvas, &watermark, x, y);
 
     // 7. 可选：叠加文字水印（EXIF 或自定义文字）
@@ -93,32 +86,29 @@ pub fn compose(
                     landscape_override: None,
                     tint: None,
                     exif_text: None,
+                    frame: None,
                 };
-                match position::compute_position(img_w, img_h, tw, th, &pos_cfg) {
-                    Ok((tx, ty)) => {
-                        eprintln!(
-                            "[watermark] overlay text_img={}x{} at ({},{}) onto canvas={}x{}",
-                            tw, th, tx, ty, canvas.width(), canvas.height()
-                        );
-                        image::imageops::overlay(&mut canvas, &text_img, tx, ty);
-                    }
-                    Err(e) => {
-                        eprintln!("[watermark] compute_position failed: {:?}", e);
-                    }
+                if let Ok((tx, ty)) =
+                    position::compute_position(img_w, img_h, tw, th, &pos_cfg)
+                {
+                    image::imageops::overlay(&mut canvas, &text_img, tx, ty);
                 }
-            } else {
-                eprintln!("[watermark] exif_text render returned None (skipping overlay)");
             }
         }
     }
 
     // 8. 展平为 RGB
     let composed: RgbImage = DynamicImage::ImageRgba8(canvas).to_rgb8();
-    eprintln!(
-        "[compose] 展平 RGB 完成 composed={}x{}",
-        composed.width(),
-        composed.height()
-    );
+
+    // 9. 可选：相框模式（白/黑边框 + 底部 EXIF 参数条），作为最终包装
+    let composed = match &config.frame {
+        Some(fc) if fc.enabled => {
+            let raw_exif: &[u8] = meta.exif.as_ref().map(|b| b.as_ref()).unwrap_or(&[]);
+            let tags = exif_text::parse_exif(raw_exif);
+            frame::apply(&composed, fc, &tags, font)?
+        }
+        _ => composed,
+    };
 
     Ok((composed, meta))
 }
@@ -310,6 +300,7 @@ mod tests {
             landscape_override: None,
             tint: None,
             exif_text: None,
+            frame: None,
         }
     }
 
@@ -527,5 +518,64 @@ mod tests {
         let webp_bytes = encode_webp(&img, 95.0).unwrap();
         let decoded = image::load_from_memory(&webp_bytes).unwrap();
         assert_eq!(decoded.dimensions(), (50, 50));
+    }
+
+    /// 端到端验证：compose 接入相框模式后，画布按 border/bottom_bar 比例扩大，
+    /// 边框色正确，且参数条上确实画出了文字（用字面量模板，绕开 EXIF 解析依赖）。
+    #[test]
+    fn compose_with_frame_expands_canvas_and_draws_bar() {
+        use crate::frame::FrameConfig;
+
+        let base = make_jpeg(400, 300, Rgb([120, 120, 120]));
+        let wm = make_png(30, 30, Rgba([255, 0, 0, 255]));
+        let mut c = cfg(GridPosition::BottomRight, 0.1, 0.8);
+        c.frame = Some(FrameConfig {
+            enabled: true,
+            border_color: [255, 255, 255],
+            border_ratio: 0.02,
+            bottom_bar_ratio: 0.12,
+            text_color: [0, 0, 0],
+            subtext_color: [80, 80, 80],
+            left_lines: vec!["HELLO".to_string()],
+            right_lines: vec![],
+            brand_template: "{brand}".to_string(),
+            show_brand: false,
+            font_size_ratio: 0.3,
+            brand_size_ratio: 0.42,
+        });
+
+        let (composed, _meta) = compose(&base, &wm, &c, None, test_font()).unwrap();
+
+        // 短边=300，border=round(300*0.02)=6，bottom_bar=round(300*0.12)=36
+        assert_eq!(composed.width(), 400 + 6 * 2, "宽度应含左右边框");
+        assert_eq!(composed.height(), 300 + 6 + 36, "高度应含上边框+底部参数条");
+
+        // 左上角应为白色边框
+        assert_eq!(composed.get_pixel(0, 0).0, [255, 255, 255]);
+
+        // 参数条左侧区域应存在黑色文字像素（非纯白背景）
+        let bar_top = 6 + 300;
+        let mut found_dark = false;
+        for y in bar_top..composed.height() {
+            for x in 6..(6 + 100).min(composed.width()) {
+                let px = composed.get_pixel(x, y);
+                if px[0] < 100 && px[1] < 100 && px[2] < 100 {
+                    found_dark = true;
+                }
+            }
+        }
+        assert!(found_dark, "参数条左侧应画出文字像素");
+    }
+
+    /// 未启用相框时，compose 输出尺寸应与原图一致（不受 frame 字段存在与否影响）。
+    #[test]
+    fn compose_without_frame_keeps_original_size() {
+        let base = make_jpeg(200, 200, Rgb([255, 255, 255]));
+        let wm = make_png(20, 20, Rgba([0, 0, 0, 255]));
+        let c = cfg(GridPosition::TopLeft, 0.1, 1.0);
+        assert!(c.frame.is_none());
+
+        let (composed, _meta) = compose(&base, &wm, &c, None, test_font()).unwrap();
+        assert_eq!(composed.dimensions(), (200, 200));
     }
 }
