@@ -21,6 +21,21 @@ export const GRID_POSITIONS: GridPosition[] = [
   "bottom_left", "bottom_center", "bottom_right",
 ];
 
+export interface ExifTextConfig {
+  enabled: boolean;
+  template: string;
+  /** 自定义文字。非 null = 直接使用此文本（忽略 EXIF 解析） */
+  custom_text: string | null;
+  /** 字号相对图片长边的比例（0.01 - 0.20） */
+  font_size_ratio: number;
+  position: GridPosition;
+  margin_x: number;
+  margin_y: number;
+  opacity: number;
+  color: [number, number, number];
+  background: [number, number, number, number] | null;
+}
+
 export interface WatermarkConfig {
   position: GridPosition;
   size_ratio: number;         // 0.01 - 1.0
@@ -30,6 +45,8 @@ export interface WatermarkConfig {
   landscape_override: GridPosition | null;
   /** 可选着色：[r,g,b]（0-255）。null=用签名原色。 */
   tint: [number, number, number] | null;
+  /** 可选：EXIF 文字水印配置 */
+  exif_text: ExifTextConfig | null;
 }
 
 /** 支持的图片输入格式扩展名（小写） */
@@ -46,6 +63,19 @@ export interface PhotoFile {
   thumbnailUrl: string | null;
 }
 
+export const DEFAULT_EXIF_TEXT: ExifTextConfig = {
+  enabled: false,
+  template: '{make} {model} · {lens} · f/{fnumber} · {shutter}s · ISO {iso}',
+  custom_text: null,
+  font_size_ratio: 0.03,
+  position: 'bottom_left',
+  margin_x: 40,
+  margin_y: 40,
+  opacity: 0.85,
+  color: [255, 255, 255],
+  background: [0, 0, 0, 80],
+};
+
 export const DEFAULT_CONFIG: WatermarkConfig = {
   position: "bottom_right",
   size_ratio: 0.15,
@@ -54,7 +84,26 @@ export const DEFAULT_CONFIG: WatermarkConfig = {
   margin_y: 30,
   landscape_override: null,
   tint: null,
+  exif_text: null,
 };
+
+/** 输出格式 */
+export type OutputFormat = 'jpeg' | 'png' | 'webp';
+
+/** 导出控制参数（每次导出时传入，不保存在预设中） */
+export interface ExportOptions {
+  max_long_side: number | null;
+  quality: number;
+  format: OutputFormat;
+}
+
+export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
+  max_long_side: null,
+  quality: 95,
+  format: 'jpeg',
+};
+
+export const DEFAULT_FILENAME_TEMPLATE = '{stem}_wm';
 
 /** RGB 数组 → CSS hex 字符串 */
 export function rgbToHex(rgb: [number, number, number]): string {

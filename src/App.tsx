@@ -5,13 +5,16 @@ import {
   ImagePlus,
   Play,
   Settings2,
+  SlidersHorizontal,
   Trash2,
+  X,
 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { DropZone } from "@/components/DropZone";
 import { FileList } from "@/components/FileList";
 import { PreviewCanvas } from "@/components/PreviewCanvas";
 import { WatermarkPanel } from "@/components/WatermarkPanel";
+import { ExportSettings } from "@/components/ExportSettings";
 import { BatchProgressPanel } from "@/components/BatchProgress";
 import { PresetManager } from "@/components/PresetManager";
 import {
@@ -25,7 +28,14 @@ import {
   type BatchSummary,
   type Preset,
 } from "@/lib/api";
-import { DEFAULT_CONFIG, type PhotoFile, type WatermarkConfig } from "@/lib/types";
+import {
+  DEFAULT_CONFIG,
+  DEFAULT_EXPORT_OPTIONS,
+  DEFAULT_FILENAME_TEMPLATE,
+  type ExportOptions,
+  type PhotoFile,
+  type WatermarkConfig,
+} from "@/lib/types";
 
 function App() {
   const [photos, setPhotos] = useState<PhotoFile[]>([]);
@@ -34,6 +44,9 @@ function App() {
   const [config, setConfig] = useState<WatermarkConfig>(DEFAULT_CONFIG);
   const [outputDir, setOutputDir] = useState<string | null>(null);
   const [activePresetName, setActivePresetName] = useState<string | null>(null);
+  const [exportOptions, setExportOptions] = useState<ExportOptions>(DEFAULT_EXPORT_OPTIONS);
+  const [filenameTemplate, setFilenameTemplate] = useState(DEFAULT_FILENAME_TEMPLATE);
+  const [showExportSettings, setShowExportSettings] = useState(false);
 
   // 批量导出状态
   const [running, setRunning] = useState(false);
@@ -130,6 +143,8 @@ function App() {
         outputDir,
         watermarkPath,
         config,
+        exportOptions,
+        filenameTemplate,
       });
       setSummary(result);
     } catch (e) {
@@ -168,6 +183,15 @@ function App() {
         </div>
         <div className="flex items-center gap-2">
           <OutputDirButton dir={outputDir} onPick={handleChooseOutputDir} />
+          <button
+            type="button"
+            onClick={() => setShowExportSettings(true)}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border/60 bg-card/40 px-2.5 py-1.5 text-[11px] text-muted-foreground transition hover:border-primary/50 hover:text-foreground"
+            title="导出设置"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            设置
+          </button>
           <button
             disabled={!canExport}
             className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
@@ -268,6 +292,35 @@ function App() {
           outputDir={outputDir}
           onClose={() => setSummary(null)}
         />
+
+        {/* 导出设置弹窗 */}
+        {showExportSettings && (
+          <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+            <div className="w-[420px] max-h-[80vh] rounded-lg border border-border/60 bg-card p-6 shadow-2xl flex flex-col">
+              <div className="flex items-center justify-between mb-4 shrink-0">
+                <div className="flex items-center gap-2">
+                  <SlidersHorizontal className="h-4 w-4 text-primary" />
+                  <span className="text-sm font-semibold">导出设置</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowExportSettings(false)}
+                  className="rounded p-0.5 text-muted-foreground hover:text-foreground transition"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto">
+                <ExportSettings
+                  options={exportOptions}
+                  filenameTemplate={filenameTemplate}
+                  onOptionsChange={setExportOptions}
+                  onFilenameTemplateChange={setFilenameTemplate}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 底部状态栏 */}

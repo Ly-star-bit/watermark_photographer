@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::batch::{self, BatchInput, ItemResult};
 use crate::error::{Result, WatermarkError};
+use crate::export::ExportOptions;
 use crate::position::WatermarkConfig;
 use crate::preset::{self, Preset};
 
@@ -34,6 +35,14 @@ pub struct ExportBatchArgs {
     pub output_dir: String,
     pub watermark_path: String,
     pub config: WatermarkConfig,
+    #[serde(default)]
+    pub export_options: ExportOptions,
+    #[serde(default = "default_filename_template")]
+    pub filename_template: String,
+}
+
+fn default_filename_template() -> String {
+    "{stem}_wm".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -52,6 +61,38 @@ pub async fn export_batch(app: AppHandle, args: ExportBatchArgs) -> Result<Batch
             "输入照片列表为空".to_string(),
         ));
     }
+    eprintln!("========== [export_batch] 开始 ==========");
+    eprintln!(
+        "[export_batch] 输入 {} 张，输出目录={}",
+        args.input_paths.len(),
+        args.output_dir
+    );
+    eprintln!("[export_batch] 水印路径={}", args.watermark_path);
+    eprintln!(
+        "[export_batch] config: position={:?} size_ratio={} opacity={} margin=({},{})",
+        args.config.position,
+        args.config.size_ratio,
+        args.config.opacity,
+        args.config.margin_x,
+        args.config.margin_y
+    );
+    match &args.config.exif_text {
+        Some(etc) => eprintln!(
+            "[export_batch] exif_text: enabled={} template={:?} custom_text={:?} font_size_ratio={} position={:?} margin=({},{}) opacity={} color={:?} background={:?}",
+            etc.enabled, etc.template, etc.custom_text,
+            etc.font_size_ratio, etc.position,
+            etc.margin_x, etc.margin_y, etc.opacity,
+            etc.color, etc.background
+        ),
+        None => eprintln!("[export_batch] exif_text=None（前端未传或为 null）"),
+    }
+    eprintln!(
+        "[export_batch] export_options: max_long_side={:?} quality={} format={:?}",
+        args.export_options.max_long_side,
+        args.export_options.quality,
+        args.export_options.format
+    );
+    eprintln!("[export_batch] filename_template={:?}", args.filename_template);
     args.config.validate()?;
 
     // 预读水印 PNG（一次 IO，共享给所有 worker）
@@ -65,6 +106,8 @@ pub async fn export_batch(app: AppHandle, args: ExportBatchArgs) -> Result<Batch
         output_dir,
         watermark_bytes: wm_bytes,
         config: args.config,
+        export_options: args.export_options,
+        filename_template: args.filename_template,
     };
 
     // 在阻塞线程池上跑（rayon 会 saturate CPU，避免占用 tauri async runtime 线程）
@@ -120,6 +163,41 @@ pub fn save_preset(app: AppHandle, preset: Preset) -> Result<Vec<Preset>> {
 #[tauri::command]
 pub fn delete_preset(app: AppHandle, name: String) -> Result<Vec<Preset>> {
     preset::delete(&config_dir(&app)?, &name)
+}
+
+// —— EXIF 文字预览 ——————————————————————————————————————
+// 前端 Canvas 预览需要知道当前照片的 EXIF 模板渲染结果，
+// 此命令从照片文件中提取 EXIF、按模板格式化后返回纯文本。
+
+#[derive(Debug, Serialize)]
+pub struct ExifTextPreview {
+    pub text: String,
+}
+
+#[tauri::command]
+pub fn preview_exif_text(
+    path: String,
+    template: String,
+    custom_text: Option<String>,
+) -> Result<ExifTextPreview> {
+    // 自定义文字模式：直接返回
+    if let Some(ref ct) = custom_text {
+        return Ok(ExifTextPreview { text: ct.clone() });
+    }
+    // EXIF 模式：从文件解析
+    let src_bytes = std::fs::read(&path)?;
+    let meta = crate::metadata::extract(&src_bytes)
+        .unwrap_or_else(|_| crate::metadata::Metadata::empty());
+    let tags = match &meta.exif {
+        Some(raw) => crate::exif_text::parse_exif(raw.as_ref()),
+        None => std::collections::HashMap::new(),
+    };
+    let text = if tags.is_empty() {
+        String::new()
+    } else {
+        crate::exif_text::format_template(&template, &tags)
+    };
+    Ok(ExifTextPreview { text })
 }
 
 // —— 缩略图 ————————————————————————————————————————————

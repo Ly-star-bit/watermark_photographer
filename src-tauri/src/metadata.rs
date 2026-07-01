@@ -62,6 +62,36 @@ pub fn inject(encoded_jpeg: Vec<u8>, meta: &Metadata) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// 构造测试用 EXIF 数据（含 Make 和 Model）。
+/// 仅用于测试；格式与真实 JPEG APP1 段一致（以 "Exif\0\0" 开头）。
+#[doc(hidden)]
+pub fn make_exif_for_test() -> Vec<u8> {
+    // 使用 img-parts 认可的格式：内联短值，避免复杂的子 IFD 结构
+    let mut buf = Vec::from(&b"Exif\0\0"[..]);
+    // TIFF header 小端 → IFD0 = 8
+    buf.extend_from_slice(b"II\x2A\x00\x08\x00\x00\x00");
+    // IFD0: 2 entries
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    // Entry 1: Make (0x010F), ASCII, count=9, 内联 "FUJI\0" (4 bytes)
+    // count=4, fits inline
+    buf.extend_from_slice(&0x0F01u16.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(&4u32.to_le_bytes());
+    buf.extend_from_slice(b"FUJI");
+    // Entry 2: Model (0x0110), ASCII, count=5, 内联 "X-T5\0" (5 bytes)
+    // count=5, 超出 4 字节，需要用 offset
+    buf.extend_from_slice(&0x1001u16.to_le_bytes());
+    buf.extend_from_slice(&2u16.to_le_bytes());
+    buf.extend_from_slice(&5u32.to_le_bytes());
+    let model_offset: u32 = 8 + 2 + 12 * 2 + 4; // after IFD0
+    buf.extend_from_slice(&model_offset.to_le_bytes());
+    // Next IFD = 0
+    buf.extend_from_slice(&0u32.to_le_bytes());
+    // Model string: "X-T5\0"
+    buf.extend_from_slice(b"X-T5\0");
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

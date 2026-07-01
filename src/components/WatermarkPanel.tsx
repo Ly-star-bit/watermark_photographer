@@ -1,8 +1,8 @@
-import { useRef } from "react";
-import { FileImage, X } from "lucide-react";
+import { useRef, useState } from "react";
+import { FileImage, Image, Type, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { GridPosition, WatermarkConfig } from "@/lib/types";
-import { GRID_POSITIONS, hexToRgb, rgbToHex } from "@/lib/types";
+import { DEFAULT_EXIF_TEXT, GRID_POSITIONS, hexToRgb, rgbToHex } from "@/lib/types";
 import { pickPngFile, basename } from "@/lib/api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -13,12 +13,65 @@ interface Props {
   onConfigChange: (patch: Partial<WatermarkConfig>) => void;
 }
 
+type TabId = "image" | "text";
+
+const TABS: { id: TabId; label: string; icon: typeof Image }[] = [
+  { id: "image", label: "图片水印", icon: Image },
+  { id: "text", label: "文字水印", icon: Type },
+];
+
 export function WatermarkPanel({
   watermarkPath,
   onWatermarkChange,
   config,
   onConfigChange,
 }: Props) {
+  const [tab, setTab] = useState<TabId>("image");
+
+  return (
+    <div className="space-y-6">
+      {/* Tab 切换 */}
+      <div className="flex rounded-md bg-muted/40 p-0.5">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => setTab(t.id)}
+            className={cn(
+              "flex flex-1 items-center justify-center gap-1.5 rounded-sm px-3 py-1.5 text-xs font-medium transition",
+              tab === t.id
+                ? "bg-card text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <t.icon className="h-3.5 w-3.5" />
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "image" ? (
+        <ImageTab
+          watermarkPath={watermarkPath}
+          onWatermarkChange={onWatermarkChange}
+          config={config}
+          onConfigChange={onConfigChange}
+        />
+      ) : (
+        <TextTab config={config} onConfigChange={onConfigChange} />
+      )}
+    </div>
+  );
+}
+
+// —— 图片水印 Tab ——————————————————————————————————————
+
+function ImageTab({
+  watermarkPath,
+  onWatermarkChange,
+  config,
+  onConfigChange,
+}: Omit<Props, "">) {
   return (
     <div className="space-y-6">
       <Section title="签名图">
@@ -77,6 +130,242 @@ export function WatermarkPanel({
     </div>
   );
 }
+
+// —— 文字水印 Tab ——————————————————————————————————————
+
+function TextTab({
+  config,
+  onConfigChange,
+}: {
+  config: WatermarkConfig;
+  onConfigChange: (patch: Partial<WatermarkConfig>) => void;
+}) {
+  const exifEnabled = config.exif_text?.enabled ?? false;
+  const cfg = config.exif_text ?? DEFAULT_EXIF_TEXT;
+  const isCustom = cfg.custom_text !== null;
+
+  return (
+    <div className="space-y-6">
+      {/* 启用开关 */}
+      <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-3">
+        <div>
+          <div className="text-xs font-medium">文字水印</div>
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            {isCustom ? "自定义文字" : "将相机型号、光圈、快门等参数以文字叠加到照片"}
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            const next = !exifEnabled;
+            onConfigChange({
+              exif_text: next
+                ? { ...cfg, enabled: true }
+                : { ...cfg, enabled: false },
+            });
+          }}
+          className={cn(
+            "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+            exifEnabled ? "bg-primary" : "bg-muted-foreground/30",
+          )}
+        >
+          <span
+            className={cn(
+              "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+              exifEnabled ? "translate-x-5" : "translate-x-1",
+            )}
+          />
+        </button>
+      </div>
+
+      {exifEnabled && (
+        <>
+          {/* 文字来源切换 */}
+          <div className="flex rounded-md bg-muted/40 p-0.5">
+            <button
+              type="button"
+              onClick={() =>
+                onConfigChange({
+                  exif_text: { ...cfg, custom_text: null },
+                })
+              }
+              className={cn(
+                "flex-1 rounded-sm px-3 py-1.5 text-xs transition",
+                !isCustom
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              EXIF 参数
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                onConfigChange({
+                  exif_text: { ...cfg, custom_text: "" },
+                })
+              }
+              className={cn(
+                "flex-1 rounded-sm px-3 py-1.5 text-xs transition",
+                isCustom
+                  ? "bg-card text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              自定义
+            </button>
+          </div>
+
+          {isCustom ? (
+            /* 自定义文字输入 */
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                文字内容
+              </label>
+              <textarea
+                value={cfg.custom_text ?? ""}
+                onChange={(e) =>
+                  onConfigChange({
+                    exif_text: { ...cfg, custom_text: e.target.value },
+                  })
+                }
+                rows={3}
+                placeholder="例如：© Photographer Name"
+                className="w-full resize-none rounded-md border border-border/60 bg-card/40 px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground/50 focus:border-primary/60 focus:outline-none"
+              />
+              <p className="text-[10px] text-muted-foreground/60">
+                支持多行，使用 Enter 换行
+              </p>
+            </div>
+          ) : (
+            /* EXIF 模板输入 */
+            <div className="space-y-1.5">
+              <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                模板
+              </label>
+              <input
+                type="text"
+                value={cfg.template}
+                onChange={(e) =>
+                  onConfigChange({
+                    exif_text: { ...cfg, template: e.target.value },
+                  })
+                }
+                className="h-8 w-full rounded-md border border-border/60 bg-card/40 px-2.5 text-[11px] text-foreground focus:border-primary/60 focus:outline-none font-mono"
+              />
+              <p className="text-[10px] text-muted-foreground/60">
+                {"{make} {model} · {lens} · f/{fnumber} · {shutter}s · ISO {iso} · {date}"}
+              </p>
+            </div>
+          )}
+
+          {/* 字号（相对图片长边的比例，例：6000px 长边 × 3% = 180px 字号） */}
+          <Section
+            title="字号"
+            hint={`${(cfg.font_size_ratio * 100).toFixed(1)}%`}
+          >
+            <Slider
+              min={0.01}
+              max={0.1}
+              step={0.001}
+              value={cfg.font_size_ratio}
+              onChange={(v) =>
+                onConfigChange({ exif_text: { ...cfg, font_size_ratio: v } })
+              }
+            />
+          </Section>
+
+          {/* 位置 */}
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              位置
+            </label>
+            <NineGrid
+              selected={cfg.position}
+              onSelect={(pos) =>
+                onConfigChange({ exif_text: { ...cfg, position: pos } })
+              }
+            />
+          </div>
+
+          {/* 边距 */}
+          <Section title="边距" hint={`${cfg.margin_x}px`}>
+            <Slider
+              min={0}
+              max={200}
+              step={1}
+              value={cfg.margin_x}
+              onChange={(v) =>
+                onConfigChange({
+                  exif_text: { ...cfg, margin_x: v, margin_y: v },
+                })
+              }
+            />
+          </Section>
+
+          {/* 不透明度 */}
+          <Section title="不透明度" hint={`${Math.round(cfg.opacity * 100)}%`}>
+            <Slider
+              min={0}
+              max={1}
+              step={0.01}
+              value={cfg.opacity}
+              onChange={(v) =>
+                onConfigChange({ exif_text: { ...cfg, opacity: v } })
+              }
+            />
+          </Section>
+
+          {/* 文字颜色 */}
+          <Section title="文字颜色" hint={rgbToHex(cfg.color).toUpperCase()}>
+            <ColorPicker
+              tint={cfg.color}
+              onChange={(t) =>
+                onConfigChange({
+                  exif_text: {
+                    ...cfg,
+                    color: t ?? [255, 255, 255],
+                  },
+                })
+              }
+            />
+          </Section>
+
+          {/* 背景条 */}
+          <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-2.5">
+            <span className="text-[11px] text-muted-foreground">背景条</span>
+            <button
+              type="button"
+              onClick={() =>
+                onConfigChange({
+                  exif_text: {
+                    ...cfg,
+                    background: cfg.background ? null : [0, 0, 0, 80],
+                  },
+                })
+              }
+              className={cn(
+                "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+                cfg.background
+                  ? "bg-primary"
+                  : "bg-muted-foreground/30",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+                  cfg.background ? "translate-x-5" : "translate-x-1",
+                )}
+              />
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// —— 公共组件 ——————————————————————————————————————————
 
 function Section({
   title,
@@ -201,7 +490,6 @@ function positionDotClass(pos: GridPosition): string {
   return `${vClass} ${hClass}`;
 }
 
-/** 常用颜色速选（覆盖多数摄影师签名场景） */
 const PRESET_COLORS: Array<{ label: string; rgb: [number, number, number] }> = [
   { label: "白", rgb: [255, 255, 255] },
   { label: "米白", rgb: [245, 240, 232] },
@@ -232,7 +520,6 @@ function ColorPicker({
   return (
     <div className="space-y-2">
       <div className="flex items-center gap-1.5">
-        {/* 原色 */}
         <button
           type="button"
           onClick={() => onChange(null)}
@@ -255,7 +542,6 @@ function ColorPicker({
           </span>
         </button>
 
-        {/* 预设色 */}
         {PRESET_COLORS.map((c) => (
           <button
             key={c.label}
@@ -272,7 +558,6 @@ function ColorPicker({
           />
         ))}
 
-        {/* 自定义颜色 */}
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -294,7 +579,6 @@ function ColorPicker({
           )}
         </button>
 
-        {/* 隐藏的原生 color 输入 */}
         <input
           ref={inputRef}
           type="color"

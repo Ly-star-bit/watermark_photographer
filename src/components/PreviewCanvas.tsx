@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Aperture, Loader2 } from "lucide-react";
 import { computePosition, targetWatermarkWidth } from "@/lib/preview";
+import { previewExifText } from "@/lib/api";
 import type { PhotoFile, WatermarkConfig } from "@/lib/types";
 
 /**
@@ -57,11 +58,8 @@ const IMAGE_CACHE_LIMIT = 5;
 
 /**
  * Canvas 实时预览。
- * 与 Rust 端 watermark::apply() 输出等效，位置/缩放使用 preview.ts 中与 Rust 一致的算法。
- * 优化：
- *  - LRU 缓存已解码的 HTMLImageElement，避免切换时重复解码 24MP 大图
- *  - decoding=async + img.decode() 走浏览器异步解码路径
- *  - 加载中显示 spinner，避免用户认为界面卡死
+ * 与 Rust 端 watermark::compose() 输出等效，位置/缩放使用 preview.ts 中与 Rust 一致的算法。
+ * 支持：PNG 签名水印 + EXIF 文字水印（异步从 Rust 获取渲染文本）。
  */
 export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -69,6 +67,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
   const cacheRef = useRef<Map<string, LoadedImage>>(new Map());
   const [baseImg, setBaseImg] = useState<LoadedImage | null>(null);
   const [wmImg, setWmImg] = useState<LoadedImage | null>(null);
+  const [exifText, setExifText] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -81,10 +80,8 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     }
     setError(null);
 
-    // 命中缓存 → 瞬时展示
     const cached = cacheRef.current.get(photo.assetUrl);
     if (cached) {
-      // 提升为最近使用
       cacheRef.current.delete(photo.assetUrl);
       cacheRef.current.set(photo.assetUrl, cached);
       setBaseImg(cached);
@@ -92,13 +89,11 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
       return;
     }
 
-    // 未命中：异步解码
     let cancelled = false;
     setLoading(true);
     loadImg(photo.assetUrl)
       .then((r) => {
         if (cancelled) return;
-        // 插入缓存，超限则淘汰最久未用
         cacheRef.current.set(photo.assetUrl, r);
         while (cacheRef.current.size > IMAGE_CACHE_LIMIT) {
           const first = cacheRef.current.keys().next().value;
@@ -117,7 +112,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     };
   }, [photo]);
 
-  // 载入水印（水印通常很小，不用缓存）
+  // 载入水印
   useEffect(() => {
     if (!watermarkUrl) {
       setWmImg(null);
@@ -131,6 +126,32 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
       cancelled = true;
     };
   }, [watermarkUrl]);
+
+  // 获取文字水印文本（自定义文字优先，否则异步获取 EXIF）
+  useEffect(() => {
+    if (!photo || !config.exif_text?.enabled) {
+      setExifText("");
+      return;
+    }
+    const etc = config.exif_text;
+    // 自定义文字模式：直接使用
+    if (etc.custom_text !== null) {
+      setExifText(etc.custom_text);
+      return;
+    }
+    // EXIF 模式：异步从 Rust 获取
+    let cancelled = false;
+    previewExifText(photo.path, etc.template, etc.custom_text)
+      .then((text) => {
+        if (!cancelled) setExifText(text);
+      })
+      .catch(() => {
+        if (!cancelled) setExifText("");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [photo, config.exif_text?.enabled, config.exif_text?.template, config.exif_text?.custom_text]);
 
   // 绘制
   useEffect(() => {
@@ -164,6 +185,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
 
     ctx.drawImage(baseImg.el, 0, 0, dw, dh);
 
+    // PNG 签名水印
     if (wmImg) {
       const targetWmW = targetWatermarkWidth(
         baseImg.width,
@@ -186,7 +208,72 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
       ctx.drawImage(src, x * s, y * s, targetWmW * s, targetWmH * s);
       ctx.globalAlpha = 1;
     }
-  }, [baseImg, wmImg, config]);
+
+    // EXIF 文字水印（Canvas fillText 渲染，与 Rust ab_glyph 渲染对应）
+    if (exifText && config.exif_text) {
+      const etc = config.exif_text;
+      // 与 Rust 端保持一致：字号 = 长边 × ratio，下限 8px（原图坐标系）
+      const longSide = Math.max(baseImg.width, baseImg.height);
+      const fontPxImg = Math.max(8, longSide * etc.font_size_ratio);
+      const fontSize = fontPxImg * s;
+      if (fontSize < 2) return; // 太小不可见，跳过
+
+      const fontFamily = "'Source Code Pro', 'Courier New', monospace";
+      ctx.font = `${fontSize}px ${fontFamily}`;
+      ctx.textBaseline = "top";
+
+      // 计算文字尺寸
+      const lines = exifText.split("\n");
+      const lineHeight = fontSize * 1.3;
+      let maxW = 0;
+      for (const line of lines) {
+        const m = ctx.measureText(line);
+        if (m.width > maxW) maxW = m.width;
+      }
+      const textW = Math.ceil(maxW);
+      const textH = Math.ceil(lineHeight * lines.length);
+
+      // 内边距（与 Rust padding 对应）
+      const pad = etc.background ? fontSize * 0.3 : 0;
+      const totalW = textW + pad * 2;
+      const totalH = textH + pad * 2;
+
+      // 用 Rust 位置算法计算坐标
+      const { x, y } = computePosition(
+        baseImg.width,
+        baseImg.height,
+        Math.ceil(totalW / s),
+        Math.ceil(totalH / s),
+        {
+          position: etc.position,
+          size_ratio: 0,
+          opacity: etc.opacity,
+          margin_x: etc.margin_x,
+          margin_y: etc.margin_y,
+          landscape_override: null,
+          tint: null,
+          exif_text: null,
+        },
+      );
+
+      const tx = x * s;
+      const ty = y * s;
+
+      // 背景条
+      if (etc.background) {
+        const [br, bg, bb, ba] = etc.background;
+        ctx.fillStyle = `rgba(${br},${bg},${bb},${ba / 255})`;
+        ctx.fillRect(tx, ty, totalW, totalH);
+      }
+
+      // 文字
+      const [cr, cg, cb] = etc.color;
+      ctx.fillStyle = `rgba(${cr},${cg},${cb},${etc.opacity})`;
+      for (let li = 0; li < lines.length; li++) {
+        ctx.fillText(lines[li], tx + pad, ty + pad + li * lineHeight);
+      }
+    }
+  }, [baseImg, wmImg, config, exifText]);
 
   // 容器 resize 时重绘
   useEffect(() => {

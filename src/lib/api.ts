@@ -7,7 +7,7 @@ import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { SUPPORTED_INPUT_EXTS, type PhotoFile, type WatermarkConfig } from "./types";
+import { SUPPORTED_INPUT_EXTS, type PhotoFile, type WatermarkConfig, type ExportOptions } from "./types";
 
 /** 判断文件扩展名是否为支持的输入图片格式（JPEG/PNG/TIFF/WebP/BMP） */
 export function isSupportedImagePath(path: string): boolean {
@@ -128,6 +128,8 @@ export async function exportBatch(args: {
   outputDir: string;
   watermarkPath: string;
   config: WatermarkConfig;
+  exportOptions: ExportOptions;
+  filenameTemplate: string;
 }): Promise<BatchSummary> {
   return invoke<BatchSummary>("export_batch", {
     args: {
@@ -135,6 +137,8 @@ export async function exportBatch(args: {
       output_dir: args.outputDir,
       watermark_path: args.watermarkPath,
       config: args.config,
+      export_options: args.exportOptions,
+      filename_template: args.filenameTemplate,
     },
   });
 }
@@ -165,4 +169,18 @@ export async function savePreset(preset: Preset): Promise<Preset[]> {
 
 export async function deletePreset(name: string): Promise<Preset[]> {
   return invoke<Preset[]>("delete_preset", { name });
+}
+
+/** 获取照片的 EXIF 文字预览（模板渲染后的文本，或自定义文字） */
+export async function previewExifText(
+  path: string,
+  template: string,
+  customText: string | null,
+): Promise<string> {
+  const result = await invoke<{ text: string }>("preview_exif_text", {
+    path,
+    template,
+    customText,
+  });
+  return result.text;
 }

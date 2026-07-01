@@ -28,6 +28,10 @@ img-parts = "0.3"
 rayon = "1"
 # 错误处理
 thiserror = "2"
+# EXIF 标签解析（纯 Rust）
+kamadak-exif = "0.6"
+# 纯 CPU 文字渲染到 RGBA 像素（无 GPU 依赖）
+ab_glyph = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

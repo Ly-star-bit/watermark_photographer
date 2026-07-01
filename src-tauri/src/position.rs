@@ -7,13 +7,16 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+use crate::exif_text::ExifTextConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GridPosition {
     TopLeft,
     TopCenter,
     TopRight,
     MiddleLeft,
+    #[default]
     Center,
     MiddleRight,
     BottomLeft,
@@ -41,6 +44,9 @@ pub struct WatermarkConfig {
     /// 用途：当签名 PNG 是白色而底图偏亮时切换成深色避免融合。
     #[serde(default)]
     pub tint: Option<[u8; 3]>,
+    /// 可选：EXIF 文字水印配置
+    #[serde(default)]
+    pub exif_text: Option<ExifTextConfig>,
 }
 
 impl WatermarkConfig {
@@ -145,6 +151,7 @@ mod tests {
             margin_y: margin,
             landscape_override: None,
             tint: None,
+            exif_text: None,
         }
     }
 

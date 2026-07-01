@@ -1,53 +1,62 @@
 // 水印合成核心流水线
 //
-// 输入：源 JPEG 字节 + PNG 水印字节 + WatermarkConfig
-// 输出：合成后的 JPEG 字节（保留 EXIF/ICC）
+// 输入：源图像字节 + PNG 水印字节 + WatermarkConfig + 可选 EXIF 文字配置
+// 输出：合成后的 RGB 像素图 + 原始元数据（EXIF/ICC）
 //
-// 流水线：
+// 流水线（compose）：
 //   1. 提取源 JPEG 的 EXIF/ICC 段（metadata::extract）
 //   2. image crate 解码底图为 RGBA
 //   3. image crate 解码水印 PNG 为 RGBA
 //   4. 按 size_ratio 缩放水印（Lanczos3 高质量重采样）
-//   5. 按 opacity 调整水印 alpha 通道
-//   6. 计算九宫格坐标（position::compute_position）
-//   7. alpha 合成（image::imageops::overlay）
-//   8. 编码为高质量 JPEG（quality=95, 4:4:4 采样）
-//   9. 回注 EXIF/ICC 段（metadata::inject）
+//   5a. 按 opacity 调整水印 alpha 通道
+//   5b. 应用着色(tint)：把非全透明像素 RGB 替换为目标色
+//   6. 计算九宫格坐标 + alpha 合成（签名水印）
+//   7. 可选：叠加 EXIF 文字水印
+//   8. 返回 RgbImage（已展平）+ Metadata
+//
+// 编码已从本模块移除，由 batch.rs 根据用户选择的格式/质量参数完成。
 
-use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
-use image::{DynamicImage, GenericImageView, ImageEncoder, ImageReader, RgbImage, RgbaImage};
+use image::{DynamicImage, GenericImageView, ImageReader, RgbImage, RgbaImage};
 use std::io::Cursor;
 
 use crate::error::Result;
+use crate::exif_text::{self, ExifTextConfig};
 use crate::metadata::{self, Metadata};
 use crate::position::{self, WatermarkConfig};
 
-/// JPEG 输出质量（1-100）。95 在画质与体积间取得良好平衡，
-/// 摄影师后期链路通常 90+ 即可。
-const JPEG_QUALITY: u8 = 95;
+// —— 合成 ————————————————————————————————————————————————
 
-/// 主入口：一次完整的合成流水线
-pub fn apply(
-    src_jpeg: &[u8],
+/// 主入口：一次完整的合成流水线。
+///
+/// 返回 (RgbImage, Metadata)，调用方负责编码和元数据回注。
+pub fn compose(
+    src_bytes: &[u8],
     watermark_png: &[u8],
     config: &WatermarkConfig,
-) -> Result<Vec<u8>> {
+    exif_text_config: Option<&ExifTextConfig>,
+    font: &ab_glyph::FontRef<'static>,
+) -> Result<(RgbImage, Metadata)> {
     config.validate()?;
 
     // 1. 提取源元数据（EXIF/ICC）
-    let meta = metadata::extract(src_jpeg).unwrap_or_else(|_| Metadata::empty());
+    let meta = metadata::extract(src_bytes).unwrap_or_else(|_| Metadata::empty());
+    eprintln!(
+        "[compose] metadata 提取 exif={} icc={}",
+        meta.exif.as_ref().map(|b| b.len()).unwrap_or(0),
+        meta.icc.as_ref().map(|b| b.len()).unwrap_or(0),
+    );
 
     // 2. 解码底图（保留原色彩，无 alpha）
-    let base = decode_image(src_jpeg)?;
+    let base = decode_image(src_bytes)?;
     let (img_w, img_h) = base.dimensions();
+    eprintln!("[compose] 底图解码 base={}x{}", img_w, img_h);
 
     // 3-4. 解码 + 缩放水印
     let watermark = prepare_watermark(watermark_png, img_w, img_h, config)?;
     let (wm_w, wm_h) = watermark.dimensions();
 
-    // 5a. 应用着色（可选）：把所有非全透明像素的 RGB 替换为目标色，
-    //     alpha 保持不变，因此签名边缘的抗锯齿羽化不受影响
+    // 5a. 应用着色（可选）
     let watermark = match config.tint {
         Some(rgb) => apply_tint(watermark, rgb),
         None => watermark,
@@ -56,20 +65,133 @@ pub fn apply(
     // 5b. 应用不透明度
     let watermark = apply_opacity(watermark, config.opacity);
 
-    // 6. 计算位置
+    // 6. 计算位置 + 合成底图
     let (x, y) = position::compute_position(img_w, img_h, wm_w, wm_h, config)?;
-
-    // 7. 合成：底图先转 RGBA 作画布，overlay 后转回 RGB
     let mut canvas = base.to_rgba8();
+    eprintln!(
+        "[compose] PNG 签名水印 {}x{} 叠加于 ({},{})",
+        wm_w, wm_h, x, y
+    );
     image::imageops::overlay(&mut canvas, &watermark, x, y);
+
+    // 7. 可选：叠加文字水印（EXIF 或自定义文字）
+    // 注意：自定义文字模式不依赖 EXIF，所以即使 meta.exif 为 None 也要调用 render。
+    if let Some(etc) = exif_text_config {
+        if etc.enabled {
+            let raw_exif: &[u8] = meta.exif.as_ref().map(|b| b.as_ref()).unwrap_or(&[]);
+            if let Some(text_img) =
+                exif_text::render(etc, raw_exif, img_w, img_h, font).unwrap_or(None)
+            {
+                let (tw, th) = text_img.dimensions();
+                // 用 ExifTextConfig 的定位参数构造临时 WatermarkConfig 做位置计算
+                let pos_cfg = WatermarkConfig {
+                    position: etc.position,
+                    size_ratio: 0.0, // 未使用
+                    opacity: etc.opacity,
+                    margin_x: etc.margin_x,
+                    margin_y: etc.margin_y,
+                    landscape_override: None,
+                    tint: None,
+                    exif_text: None,
+                };
+                match position::compute_position(img_w, img_h, tw, th, &pos_cfg) {
+                    Ok((tx, ty)) => {
+                        eprintln!(
+                            "[watermark] overlay text_img={}x{} at ({},{}) onto canvas={}x{}",
+                            tw, th, tx, ty, canvas.width(), canvas.height()
+                        );
+                        image::imageops::overlay(&mut canvas, &text_img, tx, ty);
+                    }
+                    Err(e) => {
+                        eprintln!("[watermark] compute_position failed: {:?}", e);
+                    }
+                }
+            } else {
+                eprintln!("[watermark] exif_text render returned None (skipping overlay)");
+            }
+        }
+    }
+
+    // 8. 展平为 RGB
     let composed: RgbImage = DynamicImage::ImageRgba8(canvas).to_rgb8();
+    eprintln!(
+        "[compose] 展平 RGB 完成 composed={}x{}",
+        composed.width(),
+        composed.height()
+    );
 
-    // 8. 编码为 JPEG
-    let encoded = encode_jpeg(&composed)?;
-
-    // 9. 回注元数据
-    metadata::inject(encoded, &meta)
+    Ok((composed, meta))
 }
+
+// —— 编码辅助（供 batch.rs 使用） ——————————————————————————
+
+/// 将 RGB 像素图编码为 JPEG 字节流
+pub fn encode_jpeg(img: &RgbImage, quality: u8) -> Result<Vec<u8>> {
+    use image::codecs::jpeg::JpegEncoder;
+    use image::ImageEncoder;
+
+    let mut buf = Vec::with_capacity(img.as_raw().len() / 4);
+    let encoder = JpegEncoder::new_with_quality(&mut buf, quality);
+    encoder.write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf)
+}
+
+/// 将 RGB 像素图编码为 PNG 字节流（无损，quality 参数忽略）
+pub fn encode_png(img: &RgbImage) -> Result<Vec<u8>> {
+    use image::codecs::png::PngEncoder;
+    use image::ImageEncoder;
+
+    let mut buf = Vec::new();
+    let encoder = PngEncoder::new(&mut buf);
+    encoder.write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf)
+}
+
+/// 将 RGB 像素图编码为 WebP 字节流。
+/// image 0.25 的 WebPEncoder 仅提供 new_lossless()。
+/// 如需有损 WebP，使用 DynamicImage::save 方式。
+pub fn encode_webp(img: &RgbImage, _quality: f32) -> Result<Vec<u8>> {
+    use image::codecs::webp::WebPEncoder;
+    use image::ImageEncoder;
+
+    let mut buf = Vec::new();
+    let encoder = WebPEncoder::new_lossless(&mut buf);
+    encoder.write_image(
+        img.as_raw(),
+        img.width(),
+        img.height(),
+        image::ExtendedColorType::Rgb8,
+    )?;
+    Ok(buf)
+}
+
+/// 缩放图像到指定长边上限（Lanczos3），保持宽高比。
+/// 如果 max_long_side 为 None 或原图长边已 <= 限制，返回 None 表示无需缩放。
+pub fn maybe_resize(img: &RgbImage, max_long_side: Option<u32>) -> Option<RgbImage> {
+    let limit = max_long_side?;
+    let (w, h) = img.dimensions();
+    let long = w.max(h);
+    if long <= limit {
+        return None;
+    }
+    let scale = limit as f32 / long as f32;
+    let nw = ((w as f32 * scale).round() as u32).max(1);
+    let nh = ((h as f32 * scale).round() as u32).max(1);
+    let resized = image::imageops::resize(img, nw, nh, FilterType::Lanczos3);
+    Some(resized)
+}
+
+// —— 内部辅助 ————————————————————————————————————————————
 
 /// 解码任意（自动嗅探）图像字节到 DynamicImage
 fn decode_image(bytes: &[u8]) -> Result<DynamicImage> {
@@ -130,26 +252,23 @@ fn apply_opacity(mut wm: RgbaImage, opacity: f32) -> RgbaImage {
     wm
 }
 
-/// 编码为 JPEG。采用 4:4:4 采样（不做色度下采样），最大化保留细节。
-fn encode_jpeg(img: &RgbImage) -> Result<Vec<u8>> {
-    let mut buf = Vec::with_capacity(img.as_raw().len() / 4);
-    let encoder = JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY);
-    // set_sampling_factors 在 image 0.25 中通过 JpegEncoder 默认即可保证较高质量；
-    // 采样因子在 encoder.encode_image 中由 image crate 内部处理。
-    encoder.write_image(
-        img.as_raw(),
-        img.width(),
-        img.height(),
-        image::ExtendedColorType::Rgb8,
-    )?;
-    Ok(buf)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::position::GridPosition;
-    use image::{Rgb, Rgba};
+    use image::codecs::jpeg::JpegEncoder;
+    use image::{ImageEncoder, Rgb, Rgba};
+    use std::sync::OnceLock;
+
+    /// 全局字体引用（只在测试中惰性初始化一次）
+    static TEST_FONT: OnceLock<ab_glyph::FontRef<'static>> = OnceLock::new();
+
+    fn test_font() -> &'static ab_glyph::FontRef<'static> {
+        TEST_FONT.get_or_init(|| {
+            let data = include_bytes!("../assets/SourceCodePro-Regular.ttf");
+            ab_glyph::FontRef::try_from_slice(data).expect("测试字体解析失败")
+        })
+    }
 
     /// 生成一张纯色 JPEG 字节流
     fn make_jpeg(w: u32, h: u32, color: Rgb<u8>) -> Vec<u8> {
@@ -190,7 +309,18 @@ mod tests {
             margin_y: 0,
             landscape_override: None,
             tint: None,
+            exif_text: None,
         }
+    }
+
+    /// 辅助：compose + encode JPEG 的便捷组合
+    fn compose_and_encode(
+        src: &[u8],
+        wm: &[u8],
+        config: &WatermarkConfig,
+    ) -> Result<Vec<u8>> {
+        let (img, _meta) = compose(src, wm, config, None, test_font())?;
+        encode_jpeg(&img, 95)
     }
 
     #[test]
@@ -216,38 +346,48 @@ mod tests {
 
     #[test]
     fn watermark_placed_at_top_left() {
-        // 200x200 白底 + 40x40 红水印，size_ratio 0.2 = 40px 宽，放左上，无边距
         let base = make_jpeg(200, 200, Rgb([255, 255, 255]));
         let wm_src = make_png(40, 40, Rgba([255, 0, 0, 255]));
         let c = cfg(GridPosition::TopLeft, 0.2, 1.0);
 
-        let out = apply(&base, &wm_src, &c).unwrap();
+        let out = compose_and_encode(&base, &wm_src, &c).unwrap();
         let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
 
-        // (5,5) 应在水印内 → 红色
         let p = decoded.get_pixel(5, 5);
-        assert!(p[0] > 200 && p[1] < 60 && p[2] < 60, "(5,5) 期望红色 got {:?}", p);
-        // (150,150) 应在水印外 → 白色
+        assert!(
+            p[0] > 200 && p[1] < 60 && p[2] < 60,
+            "(5,5) 期望红色 got {:?}",
+            p
+        );
         let p = decoded.get_pixel(150, 150);
-        assert!(p[0] > 240 && p[1] > 240 && p[2] > 240, "(150,150) 期望白色 got {:?}", p);
+        assert!(
+            p[0] > 240 && p[1] > 240 && p[2] > 240,
+            "(150,150) 期望白色 got {:?}",
+            p
+        );
     }
 
     #[test]
     fn watermark_placed_at_bottom_right() {
-        // 200x200 白底 + 40x40 蓝水印，右下角
         let base = make_jpeg(200, 200, Rgb([255, 255, 255]));
         let wm_src = make_png(40, 40, Rgba([0, 0, 255, 255]));
         let c = cfg(GridPosition::BottomRight, 0.2, 1.0);
 
-        let out = apply(&base, &wm_src, &c).unwrap();
+        let out = compose_and_encode(&base, &wm_src, &c).unwrap();
         let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
 
-        // (195,195) 应在水印内 → 蓝色
         let p = decoded.get_pixel(195, 195);
-        assert!(p[2] > 200 && p[0] < 60 && p[1] < 60, "(195,195) 期望蓝色 got {:?}", p);
-        // (10,10) 应在水印外 → 白色
+        assert!(
+            p[2] > 200 && p[0] < 60 && p[1] < 60,
+            "(195,195) 期望蓝色 got {:?}",
+            p
+        );
         let p = decoded.get_pixel(10, 10);
-        assert!(p[0] > 240 && p[1] > 240 && p[2] > 240, "(10,10) 期望白色 got {:?}", p);
+        assert!(
+            p[0] > 240 && p[1] > 240 && p[2] > 240,
+            "(10,10) 期望白色 got {:?}",
+            p
+        );
     }
 
     #[test]
@@ -256,29 +396,25 @@ mod tests {
         let wm = make_png(50, 50, Rgba([0, 0, 0, 255]));
         let c = cfg(GridPosition::Center, 0.15, 0.8);
 
-        let out = apply(&base, &wm, &c).unwrap();
-        // 能解码回来且尺寸不变即视为有效
+        let out = compose_and_encode(&base, &wm, &c).unwrap();
         let decoded = image::load_from_memory(&out).unwrap();
         assert_eq!(decoded.dimensions(), (300, 200));
     }
 
-    /// 端到端验证：源 JPEG 带 EXIF/ICC → apply → 输出应仍带完整 EXIF/ICC
-    /// 这是摄影师最关心的核心保障，比任何单元测试都重要。
+    /// 端到端验证：源 JPEG 带 EXIF/ICC → compose → 输出应仍带完整 EXIF/ICC
     #[test]
     fn end_to_end_preserves_exif_and_icc() {
         use crate::metadata;
         use img_parts::jpeg::Jpeg;
         use img_parts::{Bytes, ImageEXIF, ImageICC};
 
-        // 1. 生成一张无元数据的底图 JPEG
         let bare = make_jpeg(300, 200, Rgb([100, 150, 200]));
 
-        // 2. 用 img-parts 给它注入已知的 EXIF + ICC
         let src_exif: &[u8] = &[
-            0x45, 0x78, 0x69, 0x66, 0x00, 0x00, // "Exif\0\0"
-            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, // TIFF header LE
-            0x01, 0x00, // 1 IFD entry
-            0x0E, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, // ImageDescription tag
+            0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+            0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+            0x01, 0x00,
+            0x0E, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00,
             b'P', b'H', b'O', b'T', 0x00,
             0x00, 0x00, 0x00, 0x00,
         ];
@@ -290,39 +426,31 @@ mod tests {
         let mut src_with_meta = Vec::new();
         jpeg.encoder().write_to(&mut src_with_meta).unwrap();
 
-        // 3. 通过 apply 打水印
         let wm = make_png(30, 30, Rgba([255, 0, 0, 200]));
         let c = cfg(GridPosition::BottomRight, 0.1, 0.8);
-        let output = apply(&src_with_meta, &wm, &c).unwrap();
+        let (composed, meta) = compose(&src_with_meta, &wm, &c, None, test_font()).unwrap();
+        let encoded = encode_jpeg(&composed, 95).unwrap();
+        let output = metadata::inject(encoded, &meta).unwrap();
 
-        // 4. 从输出提取元数据，验证与源完全一致
         let recovered = metadata::extract(&output).unwrap();
         assert!(recovered.exif.is_some(), "输出应包含 EXIF");
         assert!(recovered.icc.is_some(), "输出应包含 ICC");
 
-        // EXIF 字节级一致
         let out_exif = recovered.exif.as_ref().unwrap();
         assert!(
             out_exif.windows(4).any(|w| w == b"PHOT"),
             "EXIF 中的 PHOT 标记应保留"
         );
 
-        // ICC 字节级一致（img-parts 会精确回搬 profile 主体）
         let out_icc = recovered.icc.as_ref().unwrap();
-        assert_eq!(
-            &out_icc[..],
-            src_icc,
-            "ICC profile 应字节级一致"
-        );
+        assert_eq!(&out_icc[..], src_icc, "ICC profile 应字节级一致");
 
-        // 5. 输出应仍是合法 JPEG，尺寸未变
         let decoded = image::load_from_memory(&output).unwrap();
         assert_eq!(decoded.dimensions(), (300, 200));
     }
 
     #[test]
     fn tint_replaces_rgb_preserves_alpha() {
-        // 白色像素（alpha=200）经 tint 后应变为目标 RGB，alpha 保持 200
         let wm = RgbaImage::from_pixel(4, 4, Rgba([255, 255, 255, 200]));
         let out = apply_tint(wm, [200, 50, 30]);
         let p = out.get_pixel(0, 0);
@@ -334,24 +462,22 @@ mod tests {
 
     #[test]
     fn tint_skips_transparent_pixels() {
-        // alpha=0 的像素应保持不变（避免透明区域被染色）
         let mut wm = RgbaImage::new(2, 1);
         wm.put_pixel(0, 0, Rgba([255, 255, 255, 255]));
-        wm.put_pixel(1, 0, Rgba([0, 0, 0, 0])); // fully transparent
+        wm.put_pixel(1, 0, Rgba([0, 0, 0, 0]));
         let out = apply_tint(wm, [255, 0, 0]);
         assert_eq!(*out.get_pixel(0, 0), Rgba([255, 0, 0, 255]));
-        assert_eq!(*out.get_pixel(1, 0), Rgba([0, 0, 0, 0])); // 不变
+        assert_eq!(*out.get_pixel(1, 0), Rgba([0, 0, 0, 0]));
     }
 
     #[test]
     fn watermark_with_tint_shows_tint_color() {
-        // 白底 + 白色水印，正常情况看不到；开启 tint 为红色后应看到红色
         let base = make_jpeg(100, 100, Rgb([255, 255, 255]));
         let wm = make_png(30, 30, Rgba([255, 255, 255, 255]));
         let mut c = cfg(GridPosition::TopLeft, 0.3, 1.0);
         c.tint = Some([255, 0, 0]);
 
-        let out = apply(&base, &wm, &c).unwrap();
+        let out = compose_and_encode(&base, &wm, &c).unwrap();
         let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
         let p = decoded.get_pixel(5, 5);
         assert!(
@@ -367,6 +493,39 @@ mod tests {
         let wm = make_png(20, 20, Rgba([0, 0, 0, 255]));
         let mut c = cfg(GridPosition::Center, 0.2, 1.5);
         c.opacity = 1.5;
-        assert!(apply(&base, &wm, &c).is_err());
+        assert!(compose_and_encode(&base, &wm, &c).is_err());
+    }
+
+    #[test]
+    fn maybe_resize_noop_for_small_image() {
+        let img = RgbImage::from_pixel(100, 50, Rgb([100, 100, 100]));
+        let result = maybe_resize(&img, Some(200));
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn maybe_resize_scales_down() {
+        let img = RgbImage::from_pixel(4000, 3000, Rgb([100, 100, 100]));
+        let result = maybe_resize(&img, Some(2000));
+        assert!(result.is_some());
+        let resized = result.unwrap();
+        assert_eq!(resized.width(), 2000);
+        assert_eq!(resized.height(), 1500);
+    }
+
+    #[test]
+    fn encode_png_roundtrip() {
+        let img = RgbImage::from_pixel(50, 50, Rgb([200, 100, 50]));
+        let png_bytes = encode_png(&img).unwrap();
+        let decoded = image::load_from_memory(&png_bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (50, 50));
+    }
+
+    #[test]
+    fn encode_webp_roundtrip() {
+        let img = RgbImage::from_pixel(50, 50, Rgb([200, 100, 50]));
+        let webp_bytes = encode_webp(&img, 95.0).unwrap();
+        let decoded = image::load_from_memory(&webp_bytes).unwrap();
+        assert_eq!(decoded.dimensions(), (50, 50));
     }
 }

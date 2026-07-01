@@ -8,6 +8,8 @@ mod position;
 mod metadata;
 mod batch;
 mod preset;
+mod export;
+mod exif_text;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -21,7 +23,8 @@ pub fn run() {
             commands::list_presets,
             commands::save_preset,
             commands::delete_preset,
-            commands::create_thumbnail
+            commands::create_thumbnail,
+            commands::preview_exif_text
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

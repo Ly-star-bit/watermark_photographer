@@ -77,6 +77,7 @@ mod tests {
                 margin_y: 30,
                 landscape_override: None,
                 tint: None,
+                exif_text: None,
             },
             watermark_path: Some("C:/sig.png".to_string()),
         }
