@@ -10,23 +10,59 @@
 //   4. 按 size_ratio 缩放水印（Lanczos3 高质量重采样）
 //   5a. 按 opacity 调整水印 alpha 通道
 //   5b. 应用着色(tint)：把非全透明像素 RGB 替换为目标色
-//   6. 计算九宫格坐标 + alpha 合成（签名水印）
+//   6. 平铺模式：旋转 + 网格铺满整图；单点模式：九宫格定位 + alpha 合成
 //   7. 可选：叠加 EXIF 文字水印
 //   8. 展平为 RgbImage
 //   9. 可选：相框模式（白/黑边框 + 底部 EXIF 参数条），作为最终包装
-//  10. 返回 RgbImage + Metadata
+//  10. 可选：画布比例扩展（补白边到目标宽高比）
+//  11. 返回 RgbImage + Metadata
 //
 // 编码已从本模块移除，由 batch.rs 根据用户选择的格式/质量参数完成。
 
 use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, ImageReader, RgbImage, RgbaImage};
+use imageproc::geometric_transformations::{rotate_about_center_no_crop, Border, Interpolation};
+use serde::{Deserialize, Serialize};
 use std::io::Cursor;
 
+use crate::canvas_expand;
 use crate::error::Result;
 use crate::exif_text::{self, ExifTextConfig};
 use crate::frame;
 use crate::metadata::{self, Metadata};
 use crate::position::{self, WatermarkConfig};
+
+// —— 平铺水印配置 ——————————————————————————————————————————
+
+/// 全图平铺水印配置：把签名图旋转后按网格铺满整张画布，用于样片防盗。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TileConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// 旋转角度（度），0-90，默认 30° 斜插防裁切
+    #[serde(default = "default_tile_angle")]
+    pub angle_deg: f32,
+    /// tile 间距，占 tile 自身宽度的比例，默认 0.6
+    #[serde(default = "default_tile_gap")]
+    pub gap_ratio: f32,
+}
+
+fn default_tile_angle() -> f32 {
+    30.0
+}
+fn default_tile_gap() -> f32 {
+    0.6
+}
+
+impl Default for TileConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            angle_deg: default_tile_angle(),
+            gap_ratio: default_tile_gap(),
+        }
+    }
+}
 
 // —— 合成 ————————————————————————————————————————————————
 
@@ -48,6 +84,7 @@ pub fn compose(
     // 2. 解码底图（保留原色彩，无 alpha）
     let base = decode_image(src_bytes)?;
     let (img_w, img_h) = base.dimensions();
+    let mut canvas = base.to_rgba8();
 
     // 3-4. 解码 + 缩放水印
     let watermark = prepare_watermark(watermark_png, img_w, img_h, config)?;
@@ -62,10 +99,16 @@ pub fn compose(
     // 5b. 应用不透明度
     let watermark = apply_opacity(watermark, config.opacity);
 
-    // 6. 计算位置 + 合成底图
-    let (x, y) = position::compute_position(img_w, img_h, wm_w, wm_h, config)?;
-    let mut canvas = base.to_rgba8();
-    image::imageops::overlay(&mut canvas, &watermark, x, y);
+    // 6. 定位/合成（平铺 与 单点九宫格 两种模式）
+    match &config.tile {
+        Some(tc) if tc.enabled => {
+            overlay_tiled(&mut canvas, &watermark, tc);
+        }
+        _ => {
+            let (x, y) = position::compute_position(img_w, img_h, wm_w, wm_h, config)?;
+            image::imageops::overlay(&mut canvas, &watermark, x, y);
+        }
+    }
 
     // 7. 可选：叠加文字水印（EXIF 或自定义文字）
     // 注意：自定义文字模式不依赖 EXIF，所以即使 meta.exif 为 None 也要调用 render。
@@ -87,6 +130,8 @@ pub fn compose(
                     tint: None,
                     exif_text: None,
                     frame: None,
+                    tile: None,
+                    canvas_ratio: None,
                 };
                 if let Ok((tx, ty)) =
                     position::compute_position(img_w, img_h, tw, th, &pos_cfg)
@@ -106,6 +151,14 @@ pub fn compose(
             let raw_exif: &[u8] = meta.exif.as_ref().map(|b| b.as_ref()).unwrap_or(&[]);
             let tags = exif_text::parse_exif(raw_exif);
             frame::apply(&composed, fc, &tags, font)?
+        }
+        _ => composed,
+    };
+
+    // 10. 可选：画布比例扩展（补白边到目标宽高比），在相框之后作为最终一步
+    let composed = match &config.canvas_ratio {
+        Some(cr) if cr.enabled => {
+            canvas_expand::expand_to_ratio(&composed, cr.ratio_w, cr.ratio_h, cr.fill_color)
         }
         _ => composed,
     };
@@ -242,6 +295,42 @@ fn apply_opacity(mut wm: RgbaImage, opacity: f32) -> RgbaImage {
     wm
 }
 
+/// 全图平铺水印：把水印按 angle_deg 旋转（透明扩边不裁切），
+/// 再以 gap_ratio 间距铺满整张画布。
+/// 从负一个步长开始遍历，确保旋转后凸出边界的部分也能覆盖画布四角。
+fn overlay_tiled(canvas: &mut RgbaImage, watermark: &RgbaImage, tc: &TileConfig) {
+    let tile: RgbaImage = if tc.angle_deg.abs() > f32::EPSILON {
+        rotate_about_center_no_crop(
+            watermark,
+            tc.angle_deg.to_radians(),
+            Interpolation::Bilinear,
+            Border::Constant(image::Rgba([0, 0, 0, 0])),
+        )
+    } else {
+        watermark.clone()
+    };
+
+    let (tw, th) = tile.dimensions();
+    if tw == 0 || th == 0 {
+        return;
+    }
+    let (cw, ch) = canvas.dimensions();
+
+    let gap = tc.gap_ratio.max(0.0);
+    let step_x = ((tw as f32) * (1.0 + gap)).max(1.0) as i64;
+    let step_y = ((th as f32) * (1.0 + gap)).max(1.0) as i64;
+
+    let mut y = -step_y;
+    while y < ch as i64 {
+        let mut x = -step_x;
+        while x < cw as i64 {
+            image::imageops::overlay(canvas, &tile, x, y);
+            x += step_x;
+        }
+        y += step_y;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +390,8 @@ mod tests {
             tint: None,
             exif_text: None,
             frame: None,
+            tile: None,
+            canvas_ratio: None,
         }
     }
 
@@ -479,6 +570,39 @@ mod tests {
     }
 
     #[test]
+    fn tiled_watermark_covers_multiple_regions() {
+        let base = make_jpeg(400, 400, Rgb([255, 255, 255]));
+        let wm = make_png(30, 30, Rgba([255, 0, 0, 255]));
+        let mut c = cfg(GridPosition::Center, 0.05, 1.0);
+        c.tile = Some(TileConfig {
+            enabled: true,
+            angle_deg: 20.0,
+            gap_ratio: 0.4,
+        });
+
+        let out = compose_and_encode(&base, &wm, &c).unwrap();
+        let decoded = image::load_from_memory(&out).unwrap().to_rgb8();
+
+        // 平铺应覆盖整张画布，四个象限都应能采样到红色像素，而非只集中在单点
+        let quadrants = [(50, 50), (350, 50), (50, 350), (350, 350)];
+        for (x, y) in quadrants {
+            let mut found_red = false;
+            for dy in 0..40u32 {
+                for dx in 0..40u32 {
+                    let p = decoded.get_pixel(
+                        (x + dx as i32 - 20).clamp(0, 399) as u32,
+                        (y + dy as i32 - 20).clamp(0, 399) as u32,
+                    );
+                    if p[0] > 180 && p[1] < 100 && p[2] < 100 {
+                        found_red = true;
+                    }
+                }
+            }
+            assert!(found_red, "象限 ({x},{y}) 附近应有平铺水印像素");
+        }
+    }
+
+    #[test]
     fn invalid_opacity_rejected() {
         let base = make_jpeg(100, 100, Rgb([255, 255, 255]));
         let wm = make_png(20, 20, Rgba([0, 0, 0, 255]));
@@ -577,5 +701,24 @@ mod tests {
 
         let (composed, _meta) = compose(&base, &wm, &c, None, test_font()).unwrap();
         assert_eq!(composed.dimensions(), (200, 200));
+    }
+
+    /// compose 接入画布比例扩展：400x300 目标 1:1 应补白到 400x400。
+    #[test]
+    fn compose_with_canvas_ratio_expands_to_target() {
+        use crate::canvas_expand::CanvasRatioConfig;
+
+        let base = make_jpeg(400, 300, Rgb([120, 120, 120]));
+        let wm = make_png(20, 20, Rgba([255, 0, 0, 255]));
+        let mut c = cfg(GridPosition::TopLeft, 0.05, 1.0);
+        c.canvas_ratio = Some(CanvasRatioConfig {
+            enabled: true,
+            ratio_w: 1,
+            ratio_h: 1,
+            fill_color: [255, 255, 255],
+        });
+
+        let (composed, _meta) = compose(&base, &wm, &c, None, test_font()).unwrap();
+        assert_eq!(composed.dimensions(), (400, 400));
     }
 }

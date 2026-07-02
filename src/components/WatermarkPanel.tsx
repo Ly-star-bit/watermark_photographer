@@ -1,8 +1,17 @@
 import { useRef, useState } from "react";
-import { FileImage, Frame, Image, Type, X } from "lucide-react";
+import { FileImage, Frame, Image, Ratio, Type, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { GridPosition, WatermarkConfig } from "@/lib/types";
-import { DEFAULT_EXIF_TEXT, DEFAULT_FRAME, GRID_POSITIONS, hexToRgb, rgbToHex } from "@/lib/types";
+import {
+  CANVAS_RATIO_PRESETS,
+  DEFAULT_CANVAS_RATIO,
+  DEFAULT_EXIF_TEXT,
+  DEFAULT_FRAME,
+  DEFAULT_TILE,
+  GRID_POSITIONS,
+  hexToRgb,
+  rgbToHex,
+} from "@/lib/types";
 import { pickPngFile, basename } from "@/lib/api";
 import { convertFileSrc } from "@tauri-apps/api/core";
 
@@ -13,12 +22,13 @@ interface Props {
   onConfigChange: (patch: Partial<WatermarkConfig>) => void;
 }
 
-type TabId = "image" | "text" | "frame";
+type TabId = "image" | "text" | "frame" | "canvas";
 
 const TABS: { id: TabId; label: string; icon: typeof Image }[] = [
   { id: "image", label: "图片水印", icon: Image },
   { id: "text", label: "文字水印", icon: Type },
   { id: "frame", label: "相框", icon: Frame },
+  { id: "canvas", label: "画布比例", icon: Ratio },
 ];
 
 export function WatermarkPanel({
@@ -60,8 +70,10 @@ export function WatermarkPanel({
         />
       ) : tab === "text" ? (
         <TextTab config={config} onConfigChange={onConfigChange} />
-      ) : (
+      ) : tab === "frame" ? (
         <FrameTab config={config} onConfigChange={onConfigChange} />
+      ) : (
+        <CanvasRatioTab config={config} onConfigChange={onConfigChange} />
       )}
     </div>
   );
@@ -75,6 +87,8 @@ function ImageTab({
   config,
   onConfigChange,
 }: Omit<Props, "">) {
+  const tile = config.tile ?? DEFAULT_TILE;
+
   return (
     <div className="space-y-6">
       <Section title="签名图">
@@ -84,12 +98,50 @@ function ImageTab({
         />
       </Section>
 
-      <Section title="位置">
-        <NineGrid
-          selected={config.position}
-          onSelect={(pos) => onConfigChange({ position: pos })}
+      {/* 全图平铺（防盗样片模式） */}
+      <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-3">
+        <div>
+          <div className="text-xs font-medium">全图平铺</div>
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            水印旋转后铺满整张照片，用于样片防盗
+          </div>
+        </div>
+        <Toggle
+          checked={tile.enabled}
+          onChange={(v) => onConfigChange({ tile: { ...tile, enabled: v } })}
         />
-      </Section>
+      </div>
+
+      {tile.enabled ? (
+        <>
+          <Section title="旋转角度" hint={`${tile.angle_deg.toFixed(0)}°`}>
+            <Slider
+              min={0}
+              max={90}
+              step={1}
+              value={tile.angle_deg}
+              onChange={(v) => onConfigChange({ tile: { ...tile, angle_deg: v } })}
+            />
+          </Section>
+
+          <Section title="平铺间距" hint={`${(tile.gap_ratio * 100).toFixed(0)}%`}>
+            <Slider
+              min={0}
+              max={2}
+              step={0.05}
+              value={tile.gap_ratio}
+              onChange={(v) => onConfigChange({ tile: { ...tile, gap_ratio: v } })}
+            />
+          </Section>
+        </>
+      ) : (
+        <Section title="位置">
+          <NineGrid
+            selected={config.position}
+            onSelect={(pos) => onConfigChange({ position: pos })}
+          />
+        </Section>
+      )}
 
       <Section title="大小" hint={`${(config.size_ratio * 100).toFixed(0)}%`}>
         <Slider
@@ -547,7 +599,133 @@ function FrameTab({
   );
 }
 
+// —— 画布比例 Tab ————————————————————————————————————————
+
+function CanvasRatioTab({
+  config,
+  onConfigChange,
+}: {
+  config: WatermarkConfig;
+  onConfigChange: (patch: Partial<WatermarkConfig>) => void;
+}) {
+  const enabled = config.canvas_ratio?.enabled ?? false;
+  const cfg = config.canvas_ratio ?? DEFAULT_CANVAS_RATIO;
+
+  const isPreset = (w: number, h: number) => cfg.ratio_w === w && cfg.ratio_h === h;
+
+  return (
+    <div className="space-y-6">
+      {/* 启用开关 */}
+      <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-3">
+        <div>
+          <div className="text-xs font-medium">画布比例扩展</div>
+          <div className="text-[10px] text-muted-foreground mt-0.5">
+            照片四周补白边，扩展到目标宽高比（社媒常用竖版/方图风格）
+          </div>
+        </div>
+        <Toggle
+          checked={enabled}
+          onChange={(v) => onConfigChange({ canvas_ratio: { ...cfg, enabled: v } })}
+        />
+      </div>
+
+      {enabled && (
+        <>
+          <div className="space-y-1.5">
+            <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              比例预设
+            </label>
+            <div className="flex flex-wrap gap-1.5">
+              {CANVAS_RATIO_PRESETS.map((p) => (
+                <button
+                  key={p.label}
+                  type="button"
+                  onClick={() =>
+                    onConfigChange({ canvas_ratio: { ...cfg, ratio_w: p.w, ratio_h: p.h } })
+                  }
+                  className={cn(
+                    "rounded-md border px-3 py-1.5 text-xs transition",
+                    isPreset(p.w, p.h)
+                      ? "border-primary/70 bg-primary/15 text-foreground"
+                      : "border-border/50 bg-card/40 text-muted-foreground hover:border-primary/40 hover:text-foreground",
+                  )}
+                >
+                  {p.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <Section title="自定义比例">
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                min={1}
+                value={cfg.ratio_w}
+                onChange={(e) =>
+                  onConfigChange({
+                    canvas_ratio: { ...cfg, ratio_w: Math.max(1, parseInt(e.target.value, 10) || 1) },
+                  })
+                }
+                className="h-8 w-16 rounded-md border border-border/60 bg-card/40 px-2 text-xs text-foreground focus:border-primary/60 focus:outline-none"
+              />
+              <span className="text-xs text-muted-foreground">:</span>
+              <input
+                type="number"
+                min={1}
+                value={cfg.ratio_h}
+                onChange={(e) =>
+                  onConfigChange({
+                    canvas_ratio: { ...cfg, ratio_h: Math.max(1, parseInt(e.target.value, 10) || 1) },
+                  })
+                }
+                className="h-8 w-16 rounded-md border border-border/60 bg-card/40 px-2 text-xs text-foreground focus:border-primary/60 focus:outline-none"
+              />
+            </div>
+          </Section>
+
+          <Section title="填充色" hint={rgbToHex(cfg.fill_color).toUpperCase()}>
+            <ColorPicker
+              tint={cfg.fill_color}
+              onChange={(t) =>
+                onConfigChange({ canvas_ratio: { ...cfg, fill_color: t ?? cfg.fill_color } })
+              }
+              allowOriginal={false}
+            />
+          </Section>
+        </>
+      )}
+    </div>
+  );
+}
+
 // —— 公共组件 ——————————————————————————————————————————
+
+function Toggle({
+  checked,
+  onChange,
+}: {
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => onChange(!checked)}
+      className={cn(
+        "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+        checked ? "bg-primary" : "bg-muted-foreground/30",
+      )}
+    >
+      <span
+        className={cn(
+          "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+          checked ? "translate-x-5" : "translate-x-1",
+        )}
+      />
+    </button>
+  );
+}
 
 function Section({
   title,

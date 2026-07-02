@@ -11,6 +11,7 @@ mod preset;
 mod export;
 mod exif_text;
 mod frame;
+mod canvas_expand;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

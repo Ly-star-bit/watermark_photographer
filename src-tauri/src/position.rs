@@ -7,8 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::canvas_expand::CanvasRatioConfig;
 use crate::exif_text::ExifTextConfig;
 use crate::frame::FrameConfig;
+use crate::watermark::TileConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +53,12 @@ pub struct WatermarkConfig {
     /// 可选：相框模式（白/黑边框 + 底部参数条）
     #[serde(default)]
     pub frame: Option<FrameConfig>,
+    /// 可选：全图平铺水印（防盗样片模式）
+    #[serde(default)]
+    pub tile: Option<TileConfig>,
+    /// 可选：画布比例扩展（补白边到目标宽高比）
+    #[serde(default)]
+    pub canvas_ratio: Option<CanvasRatioConfig>,
 }
 
 impl WatermarkConfig {
@@ -157,6 +165,8 @@ mod tests {
             tint: None,
             exif_text: None,
             frame: None,
+            tile: None,
+            canvas_ratio: None,
         }
     }
 

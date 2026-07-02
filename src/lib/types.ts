@@ -36,6 +36,45 @@ export interface ExifTextConfig {
   background: [number, number, number, number] | null;
 }
 
+/** 全图平铺水印配置（防盗样片模式） */
+export interface TileConfig {
+  enabled: boolean;
+  /** 旋转角度（度），0-90 */
+  angle_deg: number;
+  /** tile 间距，占 tile 自身宽度的比例 */
+  gap_ratio: number;
+}
+
+export const DEFAULT_TILE: TileConfig = {
+  enabled: false,
+  angle_deg: 30,
+  gap_ratio: 0.6,
+};
+
+/** 画布比例扩展配置（补白边到目标宽高比） */
+export interface CanvasRatioConfig {
+  enabled: boolean;
+  ratio_w: number;
+  ratio_h: number;
+  fill_color: [number, number, number];
+}
+
+export const DEFAULT_CANVAS_RATIO: CanvasRatioConfig = {
+  enabled: false,
+  ratio_w: 1,
+  ratio_h: 1,
+  fill_color: [255, 255, 255],
+};
+
+/** 常用画布比例预设 */
+export const CANVAS_RATIO_PRESETS: { label: string; w: number; h: number }[] = [
+  { label: "1:1", w: 1, h: 1 },
+  { label: "3:4", w: 3, h: 4 },
+  { label: "4:3", w: 4, h: 3 },
+  { label: "9:16", w: 9, h: 16 },
+  { label: "16:9", w: 16, h: 9 },
+];
+
 export interface FrameConfig {
   enabled: boolean;
   /** 边框颜色 [R,G,B]，默认接近白 [250,250,250] */
@@ -90,6 +129,10 @@ export interface WatermarkConfig {
   exif_text: ExifTextConfig | null;
   /** 可选：相框模式（白/黑边框 + 底部参数条） */
   frame: FrameConfig | null;
+  /** 可选：全图平铺水印（防盗样片模式） */
+  tile: TileConfig | null;
+  /** 可选：画布比例扩展（补白边到目标宽高比） */
+  canvas_ratio: CanvasRatioConfig | null;
 }
 
 /** 支持的图片输入格式扩展名（小写） */
@@ -129,21 +172,37 @@ export const DEFAULT_CONFIG: WatermarkConfig = {
   tint: null,
   exif_text: null,
   frame: null,
+  tile: null,
+  canvas_ratio: null,
 };
 
 /** 输出格式 */
 export type OutputFormat = 'jpeg' | 'png' | 'webp';
+
+/** 社媒导出尺寸预设 */
+export const SOCIAL_EXPORT_PRESETS: { label: string; w: number; h: number }[] = [
+  { label: "小红书竖版", w: 1080, h: 1440 },
+  { label: "小红书横版", w: 1440, h: 1080 },
+  { label: "朋友圈方图", w: 1080, h: 1080 },
+  { label: "Instagram 竖版", w: 1080, h: 1920 },
+];
 
 /** 导出控制参数（每次导出时传入，不保存在预设中） */
 export interface ExportOptions {
   max_long_side: number | null;
   quality: number;
   format: OutputFormat;
+  /** 社媒固定尺寸 [宽, 高]。设置后忽略 max_long_side，缩放+居中补白到精确尺寸 */
+  target_size: [number, number] | null;
+  /** target_size 补白部分的填充色 */
+  target_fill_color: [number, number, number];
 }
 
 export const DEFAULT_EXPORT_OPTIONS: ExportOptions = {
   max_long_side: null,
   quality: 95,
+  target_size: null,
+  target_fill_color: [255, 255, 255],
   format: 'jpeg',
 };
 

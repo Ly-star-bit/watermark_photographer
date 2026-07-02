@@ -111,8 +111,10 @@ fn do_one(
     let exif_text_cfg = config.exif_text.as_ref();
     let (composed, meta) = watermark::compose(&src_bytes, wm, config, exif_text_cfg, font)?;
 
-    // 2. 可选缩图（长边限制）
-    let final_img = if let Some(resized) = watermark::maybe_resize(&composed, export_opts.max_long_side) {
+    // 2. 尺寸调整：社媒固定尺寸（缩放+补白到精确像素）优先于长边限制
+    let final_img = if let Some((tw, th)) = export_opts.target_size {
+        crate::canvas_expand::fit_to_exact_size(&composed, tw, th, export_opts.target_fill_color)
+    } else if let Some(resized) = watermark::maybe_resize(&composed, export_opts.max_long_side) {
         resized
     } else {
         composed
@@ -267,6 +269,8 @@ mod tests {
             tint: None,
             exif_text: None,
             frame: None,
+            tile: None,
+            canvas_ratio: None,
         }
     }
 
@@ -335,6 +339,8 @@ mod tests {
                 tint: None,
                 exif_text: None,
                 frame: None,
+                tile: None,
+                canvas_ratio: None,
             },
             export_options: default_export_opts(),
             filename_template: "{stem}_wm".to_string(),
@@ -458,5 +464,35 @@ mod tests {
         let decoded = image::open(&out_path).unwrap();
         assert_eq!(decoded.width(), 2048); // 长边限制到 2048
         assert_eq!(decoded.height(), 1365); // 4000 * 2048/6000 = 1365
+    }
+
+    /// 社媒固定尺寸导出：output 应精确等于 target_size，且优先于 max_long_side。
+    #[test]
+    fn target_size_produces_exact_dimensions() {
+        let dir = tempdir().unwrap();
+        let out_dir = dir.path().join("out");
+        let src = dir.path().join("test.jpg");
+        make_jpeg_at(&src, 4000, 3000, Rgb([100, 100, 100]));
+
+        let task = BatchInput {
+            input_paths: vec![src],
+            output_dir: out_dir.clone(),
+            watermark_bytes: make_png_bytes(20, 20, Rgba([255, 0, 0, 255])),
+            config: default_config(),
+            export_options: ExportOptions {
+                max_long_side: Some(2048), // 应被 target_size 覆盖，不生效
+                target_size: Some((1080, 1440)),
+                ..Default::default()
+            },
+            filename_template: "{stem}_{n}".to_string(),
+        };
+
+        let results = run(&task, |_, _, _, _| {});
+        assert!(results[0].error.is_none());
+
+        let out_path = out_dir.join("test_001.jpg");
+        let decoded = image::open(&out_path).unwrap();
+        assert_eq!(decoded.width(), 1080);
+        assert_eq!(decoded.height(), 1440);
     }
 }

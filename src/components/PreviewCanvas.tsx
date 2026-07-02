@@ -208,16 +208,33 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     const pw = baseImg.width;
     const ph = baseImg.height;
     const fc = config.frame?.enabled ? config.frame : null;
+    const crCfg = config.canvas_ratio?.enabled ? config.canvas_ratio : null;
 
     // 相框几何（与 Rust frame::apply 同公式）：短边 × ratio 得到边框/参数条宽度。
     // border/bottomBar 与 photo 共享同一原图像素坐标系，photo 偏移 (border, border)。
     const short = Math.min(pw, ph);
     const border = fc ? Math.round(short * fc.border_ratio) : 0;
     const bottomBar = fc ? Math.round(short * fc.bottom_bar_ratio) : 0;
-    const newW = pw + border * 2;
-    const newH = ph + border + bottomBar;
+    const frameW = pw + border * 2;
+    const frameH = ph + border + bottomBar;
 
-    const ratio = newW / newH;
+    // 画布比例扩展（与 Rust canvas_expand::expand_to_ratio 同公式）：
+    // 在相框画布基础上，只补一个方向的白边到目标比例，内容居中。
+    let canvasW = frameW;
+    let canvasH = frameH;
+    if (crCfg && crCfg.ratio_w > 0 && crCfg.ratio_h > 0) {
+      const targetRatio = crCfg.ratio_w / crCfg.ratio_h;
+      const curRatio = frameW / frameH;
+      if (curRatio > targetRatio) {
+        canvasH = Math.max(frameH, Math.round(frameW / targetRatio));
+      } else {
+        canvasW = Math.max(frameW, Math.round(frameH * targetRatio));
+      }
+    }
+    const padX = Math.round((canvasW - frameW) / 2);
+    const padY = Math.round((canvasH - frameH) / 2);
+
+    const ratio = canvasW / canvasH;
     let dw = cw;
     let dh = cw / ratio;
     if (dh > ch) {
@@ -235,19 +252,68 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, dw, dh);
 
-    // 统一缩放系数：原图像素坐标系（含边框/参数条）→ 显示像素。
-    // 未启用相框时 border=0、newW=pw，退化为原有的 s = dw / baseImg.width。
-    const s = dw / newW;
+    // 统一缩放系数：原图像素坐标系（含边框/参数条/画布比例白边）→ 显示像素。
+    // 未启用相框/画布比例时 padX=padY=border=0、canvasW=pw，退化为原有的 s = dw / baseImg.width。
+    const s = dw / canvasW;
 
-    if (fc) {
-      ctx.fillStyle = `rgb(${fc.border_color[0]},${fc.border_color[1]},${fc.border_color[2]})`;
+    // 画布比例白边（若比相框画布更大，先铺满整个画布）
+    if (crCfg) {
+      ctx.fillStyle = `rgb(${crCfg.fill_color[0]},${crCfg.fill_color[1]},${crCfg.fill_color[2]})`;
       ctx.fillRect(0, 0, dw, dh);
     }
 
-    ctx.drawImage(baseImg.el, border * s, border * s, pw * s, ph * s);
+    if (fc) {
+      ctx.fillStyle = `rgb(${fc.border_color[0]},${fc.border_color[1]},${fc.border_color[2]})`;
+      ctx.fillRect(padX * s, padY * s, frameW * s, frameH * s);
+    }
 
-    // PNG 签名水印（叠加在照片区内，坐标需加上 border 偏移）
-    if (wmImg) {
+    ctx.drawImage(baseImg.el, (padX + border) * s, (padY + border) * s, pw * s, ph * s);
+
+    // 签名水印：平铺模式 或 单点九宫格模式
+    if (wmImg && config.tile?.enabled) {
+      const tileCfg = config.tile;
+      const targetWmW = targetWatermarkWidth(pw, ph, config.size_ratio);
+      const wmScale = targetWmW / wmImg.width;
+      const targetWmH = Math.max(1, Math.round(wmImg.height * wmScale));
+      const tinted = tintWatermark(wmImg.el, wmImg.width, wmImg.height, config.tint);
+
+      const photoX0 = (padX + border) * s;
+      const photoY0 = (padY + border) * s;
+      const photoW = pw * s;
+      const photoH = ph * s;
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(photoX0, photoY0, photoW, photoH);
+      ctx.clip();
+
+      const angleRad = (tileCfg.angle_deg * Math.PI) / 180;
+      const gap = Math.max(0, tileCfg.gap_ratio);
+      const stepX = Math.max(1, targetWmW * (1 + gap) * s);
+      const stepY = Math.max(1, targetWmH * (1 + gap) * s);
+      const drawW = targetWmW * s;
+      const drawH = targetWmH * s;
+
+      // 覆盖范围：以照片区域为中心向四周扩展一个对角线长度，保证旋转后不留空隙
+      const diag = Math.sqrt(photoW * photoW + photoH * photoH);
+      const startX = photoX0 - diag;
+      const endX = photoX0 + photoW + diag;
+      const startY = photoY0 - diag;
+      const endY = photoY0 + photoH + diag;
+
+      ctx.globalAlpha = Math.max(0, Math.min(1, config.opacity));
+      for (let y = startY; y < endY; y += stepY) {
+        for (let x = startX; x < endX; x += stepX) {
+          ctx.save();
+          ctx.translate(x, y);
+          ctx.rotate(angleRad);
+          ctx.drawImage(tinted, -drawW / 2, -drawH / 2, drawW, drawH);
+          ctx.restore();
+        }
+      }
+      ctx.globalAlpha = 1;
+      ctx.restore();
+    } else if (wmImg) {
       const targetWmW = targetWatermarkWidth(pw, ph, config.size_ratio);
       const wmScale = targetWmW / wmImg.width;
       const targetWmH = Math.max(1, Math.round(wmImg.height * wmScale));
@@ -256,7 +322,13 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
 
       const src = tintWatermark(wmImg.el, wmImg.width, wmImg.height, config.tint);
       ctx.globalAlpha = Math.max(0, Math.min(1, config.opacity));
-      ctx.drawImage(src, (border + x) * s, (border + y) * s, targetWmW * s, targetWmH * s);
+      ctx.drawImage(
+        src,
+        (padX + border + x) * s,
+        (padY + border + y) * s,
+        targetWmW * s,
+        targetWmH * s,
+      );
       ctx.globalAlpha = 1;
     }
 
@@ -305,11 +377,13 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
             tint: null,
             exif_text: null,
             frame: null,
+            tile: null,
+            canvas_ratio: null,
           },
         );
 
-        const tx = (border + x) * s;
-        const ty = (border + y) * s;
+        const tx = (padX + border + x) * s;
+        const ty = (padY + border + y) * s;
 
         // 背景条
         if (etc.background) {
@@ -329,7 +403,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
 
     // 相框：顶部分割线 + 底部参数条文本（与 Rust frame::apply 排版公式一致）
     if (fc) {
-      const barTop = border + ph;
+      const barTop = padY + border + ph;
       const barH = bottomBar;
       const innerPad = Math.round(barH * 0.15);
       const mainFontPx = Math.max(barH * fc.font_size_ratio, 10);
@@ -340,7 +414,7 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
       // 顶部分割线
       const sepThickness = Math.max(barH * 0.015, 1);
       ctx.fillStyle = darkenColor(fc.border_color, 0.85);
-      ctx.fillRect(border * s, barTop * s, pw * s, sepThickness * s);
+      ctx.fillRect((padX + border) * s, barTop * s, pw * s, sepThickness * s);
 
       const textBlockH = mainFontPx + subFontPx * 0.2 + subFontPx;
       const textY0 = barTop + (barH - textBlockH) / 2;
@@ -359,15 +433,15 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
         });
       };
 
-      drawBlock(frameTexts.left, border + innerPad, "left");
-      drawBlock(frameTexts.right, newW - border - innerPad, "right");
+      drawBlock(frameTexts.left, padX + border + innerPad, "left");
+      drawBlock(frameTexts.right, padX + frameW - border - innerPad, "right");
 
       if (fc.show_brand && frameTexts.brand) {
         ctx.textAlign = "center";
         ctx.font = `${brandFontPx * s}px ${fontFamily}`;
         ctx.fillStyle = `rgb(${fc.text_color[0]},${fc.text_color[1]},${fc.text_color[2]})`;
         const cy = barTop + (barH - brandFontPx) / 2;
-        ctx.fillText(frameTexts.brand, (newW / 2) * s, cy * s);
+        ctx.fillText(frameTexts.brand, (padX + frameW / 2) * s, cy * s);
       }
     }
   }, [baseImg, wmImg, config, exifText, frameTexts]);

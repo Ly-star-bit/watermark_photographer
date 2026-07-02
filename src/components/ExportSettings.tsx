@@ -1,5 +1,6 @@
 import { cn } from "@/lib/utils";
 import type { ExportOptions, OutputFormat } from "@/lib/types";
+import { SOCIAL_EXPORT_PRESETS } from "@/lib/types";
 
 interface Props {
   options: ExportOptions;
@@ -88,12 +89,54 @@ export function ExportSettings({
         </div>
       )}
 
+      {/* 社媒导出预设 */}
+      <div className="space-y-2">
+        <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          社媒尺寸预设
+        </label>
+        <div className="flex flex-wrap gap-1.5">
+          {SOCIAL_EXPORT_PRESETS.map((p) => {
+            const active =
+              options.target_size?.[0] === p.w && options.target_size?.[1] === p.h;
+            return (
+              <button
+                key={p.label}
+                type="button"
+                onClick={() =>
+                  onOptionsChange({ ...options, target_size: [p.w, p.h], max_long_side: null })
+                }
+                className={cn(
+                  "rounded-md border px-2.5 py-1.5 text-xs transition",
+                  active
+                    ? "border-primary/70 bg-primary/15 text-primary ring-1 ring-primary/50"
+                    : "border-border/40 bg-card/40 text-muted-foreground hover:border-primary/40",
+                )}
+              >
+                {p.label} {p.w}×{p.h}
+              </button>
+            );
+          })}
+          {options.target_size && (
+            <button
+              type="button"
+              onClick={() => onOptionsChange({ ...options, target_size: null })}
+              className="rounded-md border border-border/40 bg-card/40 px-2.5 py-1.5 text-xs text-muted-foreground transition hover:border-primary/40"
+            >
+              不限制
+            </button>
+          )}
+        </div>
+        <p className="text-[10px] text-muted-foreground/60">
+          缩放后居中补白到精确尺寸，不裁切内容
+        </p>
+      </div>
+
       {/* 长边限制 */}
       <div className="space-y-2">
         <label className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
           长边限制
         </label>
-        <div className="flex items-center gap-1.5">
+        <div className={cn("flex items-center gap-1.5", options.target_size && "pointer-events-none opacity-40")}>
           <input
             type="number"
             placeholder="原尺寸"
@@ -111,7 +154,9 @@ export function ExportSettings({
           <span className="text-[11px] text-muted-foreground shrink-0">px</span>
         </div>
         <p className="text-[10px] text-muted-foreground/60">
-          留空=原尺寸。常用值：微博/Ins 2048px
+          {options.target_size
+            ? "已选社媒尺寸预设，长边限制不生效"
+            : "留空=原尺寸。常用值：微博/Ins 2048px"}
         </p>
       </div>
 

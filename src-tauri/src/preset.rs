@@ -79,6 +79,8 @@ mod tests {
                 tint: None,
                 exif_text: None,
                 frame: None,
+                tile: None,
+                canvas_ratio: None,
             },
             watermark_path: Some("C:/sig.png".to_string()),
         }
