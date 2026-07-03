@@ -358,7 +358,8 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
 
         // 内边距（与 Rust padding 对应）
         const pad = etc.background ? fontSize * 0.3 : 0;
-        const totalW = textW + pad * 2;
+        // 整行通栏：背景条宽度铺满整幅图片（与 Rust full_width 分支一致）
+        const totalW = etc.full_width ? pw * s : textW + pad * 2;
         const totalH = textH + pad * 2;
 
         // 用 Rust 位置算法计算坐标（照片区内，仍需加 border 偏移）
@@ -435,6 +436,32 @@ export function PreviewCanvas({ photo, watermarkUrl, config }: Props) {
 
       drawBlock(frameTexts.left, padX + border + innerPad, "left");
       drawBlock(frameTexts.right, padX + frameW - border - innerPad, "right");
+
+      // 竖向分隔线：画在右块左侧（与 Rust frame::apply 的 divider 公式一致）
+      if (fc.show_divider) {
+        ctx.font = `${mainFontPx * s}px ${fontFamily}`;
+        let maxRightW = 0;
+        for (const line of frameTexts.right) {
+          const w = ctx.measureText(line).width;
+          if (w > maxRightW) maxRightW = w;
+        }
+        const maxRightWImg = maxRightW / s;
+        const rightX1 = frameW - border - innerPad;
+        const dividerThickness = Math.max(barH * 0.02, 1);
+        const dividerMargin = Math.round(barH * 0.2);
+        const maxX = Math.max(frameW - border - dividerThickness, border);
+        const dividerX = Math.min(
+          Math.max(rightX1 - maxRightWImg - innerPad, border),
+          maxX,
+        );
+        ctx.fillStyle = darkenColor(fc.border_color, 0.7);
+        ctx.fillRect(
+          (padX + dividerX) * s,
+          (barTop + dividerMargin) * s,
+          dividerThickness * s,
+          (barH - dividerMargin * 2) * s,
+        );
+      }
 
       if (fc.show_brand && frameTexts.brand) {
         ctx.textAlign = "center";

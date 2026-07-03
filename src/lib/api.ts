@@ -90,6 +90,13 @@ export async function pickOutputDir(): Promise<string | null> {
   return selected;
 }
 
+/** 选择监听输入目录（与 pickOutputDir 实现一致，独立命名让调用意图更清晰） */
+export async function pickInputDir(): Promise<string | null> {
+  const selected = await open({ directory: true, multiple: false });
+  if (!selected || Array.isArray(selected)) return null;
+  return selected;
+}
+
 // —— 批量导出 —————————————————————————————————————————————
 
 /** 进度事件 payload（与 Rust BatchProgress 一致） */
@@ -194,4 +201,72 @@ export async function previewFrame(
     path,
     config,
   });
+}
+
+// —— 监听文件夹模式 ——————————————————————————————————————————
+// 持续监听输入文件夹，新文件写入完成后自动打水印输出到输出文件夹。
+// 单任务模型：同一时刻只允许一个监听任务运行。
+
+/** 启动监听（Rust 侧后台线程持续跑，直到调用 stopWatch） */
+export async function startWatch(args: {
+  inputDir: string;
+  outputDir: string;
+  watermarkPath: string;
+  config: WatermarkConfig;
+  exportOptions: ExportOptions;
+  filenameTemplate: string;
+}): Promise<void> {
+  return invoke<void>("start_watch", {
+    args: {
+      input_dir: args.inputDir,
+      output_dir: args.outputDir,
+      watermark_path: args.watermarkPath,
+      config: args.config,
+      export_options: args.exportOptions,
+      filename_template: args.filenameTemplate,
+    },
+  });
+}
+
+/** 停止监听 */
+export async function stopWatch(): Promise<void> {
+  return invoke<void>("stop_watch");
+}
+
+/** 实时更新正在运行的监听任务的水印配置（不重启监听，输入/输出文件夹不可变更）。
+ *  右侧面板改设置时应调用，确保监听任务用的是当前配置而非启动时的快照。
+ */
+export async function updateWatchConfig(args: {
+  watermarkPath: string;
+  config: WatermarkConfig;
+  exportOptions: ExportOptions;
+  filenameTemplate: string;
+}): Promise<void> {
+  return invoke<void>("update_watch_config", {
+    args: {
+      watermark_path: args.watermarkPath,
+      config: args.config,
+      export_options: args.exportOptions,
+      filename_template: args.filenameTemplate,
+    },
+  });
+}
+
+/** 查询监听是否正在运行（前端本地状态之外的兜底校验） */
+export async function getWatchStatus(): Promise<{ running: boolean }> {
+  return invoke<{ running: boolean }>("get_watch_status");
+}
+
+/** 监听 watch-file-processed 事件（与 Rust ItemResult 字段一致） */
+export async function onWatchFileProcessed(
+  cb: (r: ItemResult) => void,
+): Promise<UnlistenFn> {
+  return listen<ItemResult>("watch-file-processed", (e) => cb(e.payload));
+}
+
+/** 监听 watch-file-started 事件：检测到新文件、准备开始处理时触发（早于写入稳定性检测），用于前端展示"处理中" */
+export async function onWatchFileStarted(
+  cb: (r: { input: string }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ input: string }>("watch-file-started", (e) => cb(e.payload));
 }

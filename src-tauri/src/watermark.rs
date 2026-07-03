@@ -666,6 +666,7 @@ mod tests {
             show_brand: false,
             font_size_ratio: 0.3,
             brand_size_ratio: 0.42,
+            show_divider: false,
         });
 
         let (composed, _meta) = compose(&base, &wm, &c, None, test_font()).unwrap();

@@ -69,6 +69,9 @@ pub struct ExifTextConfig {
     /// 可选背景条 [R, G, B, A]（在文字后方绘制半透明色块）
     #[serde(default)]
     pub background: Option<[u8; 4]>,
+    /// 整行通栏：背景条宽度铺满整幅图片宽度（而非贴合文字宽度）
+    #[serde(default)]
+    pub full_width: bool,
 }
 
 fn default_text_template() -> String {
@@ -97,6 +100,7 @@ impl Default for ExifTextConfig {
             opacity: default_text_opacity(),
             color: default_text_color(),
             background: Some([0, 0, 0, 80]),
+            full_width: false,
         }
     }
 }
@@ -321,14 +325,18 @@ pub fn render(
     let long_side = img_w.max(img_h) as f32;
     let font_px = (long_side * config.font_size_ratio).max(8.0);
 
-    render_text(&text, config, font_px, font)
+    render_text(&text, config, font_px, img_w, font)
 }
 
 /// 纯文字渲染（不含 EXIF 解析逻辑）
+///
+/// `img_w` 仅在 `config.full_width` 时使用：背景条宽度铺满整幅图片，
+/// 而非贴合文字宽度（用于顶部/底部通栏样式）。
 fn render_text(
     text: &str,
     config: &ExifTextConfig,
     font_px: f32,
+    img_w: u32,
     font: &FontRef<'static>,
 ) -> Result<Option<RgbaImage>> {
     let scale = PxScale::from(font_px);
@@ -355,7 +363,12 @@ fn render_text(
         0
     };
 
-    let total_w = (max_w + padding * 2).max(1);
+    // 通栏模式：背景条宽度铺满整幅图片；否则贴合文字宽度
+    let total_w = if config.full_width {
+        img_w.max(1)
+    } else {
+        (max_w + padding * 2).max(1)
+    };
     let total_h = (line_height * lines.len() as u32 + padding * 2).max(1);
 
     let mut img = RgbaImage::new(total_w, total_h);
@@ -541,6 +554,37 @@ mod tests {
         let font = get_font();
         let result = render(&config, &[], 1000, 1000, font).unwrap();
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn full_width_bar_matches_image_width() {
+        let config = ExifTextConfig {
+            enabled: true,
+            custom_text: Some("SONY ILCE-7RM3A".to_string()),
+            full_width: true,
+            background: Some([0, 0, 0, 80]),
+            ..Default::default()
+        };
+        let font = get_font();
+        let result = render(&config, &[], 4000, 3000, font).unwrap().unwrap();
+        assert_eq!(result.width(), 4000, "通栏模式下背景条宽度应等于图片宽度");
+    }
+
+    #[test]
+    fn non_full_width_bar_fits_text() {
+        let config = ExifTextConfig {
+            enabled: true,
+            custom_text: Some("SONY ILCE-7RM3A".to_string()),
+            full_width: false,
+            background: Some([0, 0, 0, 80]),
+            ..Default::default()
+        };
+        let font = get_font();
+        let result = render(&config, &[], 4000, 3000, font).unwrap().unwrap();
+        assert!(
+            result.width() < 4000,
+            "非通栏模式下背景条宽度应贴合文字，远小于图片宽度"
+        );
     }
 
     #[test]

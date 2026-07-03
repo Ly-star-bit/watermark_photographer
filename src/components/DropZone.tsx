@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { ImagePlus } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { cn, subscribeAsync } from "@/lib/utils";
 import { onImageDrop, pickImageFiles } from "@/lib/api";
 
 interface Props {
@@ -12,11 +12,10 @@ export function DropZone({ onFiles }: Props) {
   const [dragging, setDragging] = useState(false);
 
   // 注册 OS 级别拖入监听（整窗口范围）
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    onImageDrop((paths) => onFiles(paths)).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
-  }, [onFiles]);
+  useEffect(
+    () => subscribeAsync(() => onImageDrop((paths) => onFiles(paths))),
+    [onFiles],
+  );
 
   const handleClick = async () => {
     const paths = await pickImageFiles();

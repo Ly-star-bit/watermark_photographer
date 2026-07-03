@@ -414,6 +414,30 @@ function TextTab({
               />
             </button>
           </div>
+
+          {/* 整行通栏：背景条铺满整幅图片宽度（顶部/底部信息条常见样式） */}
+          <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-2.5">
+            <span className="text-[11px] text-muted-foreground">整行通栏</span>
+            <button
+              type="button"
+              onClick={() =>
+                onConfigChange({
+                  exif_text: { ...cfg, full_width: !cfg.full_width },
+                })
+              }
+              className={cn(
+                "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+                cfg.full_width ? "bg-primary" : "bg-muted-foreground/30",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+                  cfg.full_width ? "translate-x-5" : "translate-x-1",
+                )}
+              />
+            </button>
+          </div>
         </>
       )}
     </div>
@@ -473,7 +497,7 @@ function FrameTab({
 
           <Section title="边框宽度" hint={`${(cfg.border_ratio * 100).toFixed(1)}%`}>
             <Slider
-              min={0.005}
+              min={0}
               max={0.06}
               step={0.001}
               value={cfg.border_ratio}
@@ -573,6 +597,28 @@ function FrameTab({
               />
             </Section>
           )}
+
+          {/* 竖向分隔线：右块左侧的分隔竖线（Canon 风参数条常见样式） */}
+          <div className="flex items-center justify-between rounded-md border border-border/60 bg-card/40 p-2.5">
+            <span className="text-[11px] text-muted-foreground">竖向分隔线</span>
+            <button
+              type="button"
+              onClick={() =>
+                onConfigChange({ frame: { ...cfg, show_divider: !cfg.show_divider } })
+              }
+              className={cn(
+                "inline-flex h-6 w-10 shrink-0 items-center rounded-full transition",
+                cfg.show_divider ? "bg-primary" : "bg-muted-foreground/30",
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 rounded-full bg-white shadow transition",
+                  cfg.show_divider ? "translate-x-5" : "translate-x-1",
+                )}
+              />
+            </button>
+          </div>
 
           <Section title="主文字颜色" hint={rgbToHex(cfg.text_color).toUpperCase()}>
             <ColorPicker

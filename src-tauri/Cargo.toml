@@ -1,6 +1,6 @@
 [package]
 name = "watermark_app"
-version = "0.1.0"
+version = "0.3.0"
 description = "批量签名水印工具"
 authors = ["photographer"]
 edition = "2021"
@@ -36,6 +36,7 @@ ab_glyph = "0.2"
 imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
 # EXIF 读写（版权字段 Artist/Copyright 写入 JPEG）
 little_exif = "0.6"
+notify = "8"
 
 [dev-dependencies]
 tempfile = "3"

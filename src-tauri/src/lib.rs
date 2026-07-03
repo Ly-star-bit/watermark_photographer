@@ -12,6 +12,7 @@ mod export;
 mod exif_text;
 mod frame;
 mod canvas_expand;
+mod watch;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -19,6 +20,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .manage(std::sync::Mutex::new(commands::WatchState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::ping,
             commands::export_batch,
@@ -27,7 +29,11 @@ pub fn run() {
             commands::delete_preset,
             commands::create_thumbnail,
             commands::preview_exif_text,
-            commands::preview_frame
+            commands::preview_frame,
+            commands::start_watch,
+            commands::stop_watch,
+            commands::get_watch_status,
+            commands::update_watch_config
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

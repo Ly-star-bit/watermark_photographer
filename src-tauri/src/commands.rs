@@ -8,13 +8,15 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter, Manager};
+use std::sync::Mutex;
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::batch::{self, BatchInput, ItemResult};
 use crate::error::{Result, WatermarkError};
 use crate::export::ExportOptions;
 use crate::position::WatermarkConfig;
 use crate::preset::{self, Preset};
+use crate::watch::{self, WatchHandle};
 
 #[tauri::command]
 pub fn ping() -> String {
@@ -226,4 +228,107 @@ fn create_thumbnail_impl(path: &str, max_size: u32) -> Result<Vec<u8>> {
     JpegEncoder::new_with_quality(&mut buf, 78)
         .write_image(small.as_raw(), tw, th, image::ExtendedColorType::Rgb8)?;
     Ok(buf)
+}
+
+// —— 监听文件夹模式 ——————————————————————————————————————
+// 持续监听输入文件夹，新文件写入完成后自动打水印输出。
+// 全局单任务：同一时刻只允许一个监听任务运行，State 里只存一个 Option<WatchHandle>。
+
+#[derive(Default)]
+pub struct WatchState {
+    pub handle: Option<WatchHandle>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct StartWatchArgs {
+    pub input_dir: String,
+    pub output_dir: String,
+    pub watermark_path: String,
+    pub config: WatermarkConfig,
+    #[serde(default)]
+    pub export_options: ExportOptions,
+    #[serde(default = "default_filename_template")]
+    pub filename_template: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WatchStatus {
+    pub running: bool,
+}
+
+#[tauri::command]
+pub fn start_watch(
+    app: AppHandle,
+    state: State<'_, Mutex<WatchState>>,
+    args: StartWatchArgs,
+) -> Result<()> {
+    args.config.validate()?;
+
+    let mut guard = state.lock().unwrap();
+    if guard.handle.is_some() {
+        return Err(WatermarkError::InvalidParam(
+            "已有监听任务运行中，请先停止".to_string(),
+        ));
+    }
+
+    let wm_bytes = std::fs::read(&args.watermark_path)?;
+    let watch_args = watch::WatchArgs {
+        input_dir: PathBuf::from(&args.input_dir),
+        output_dir: PathBuf::from(&args.output_dir),
+        live: watch::LiveConfig {
+            watermark_bytes: wm_bytes,
+            config: args.config,
+            export_options: args.export_options,
+            filename_template: args.filename_template,
+        },
+    };
+
+    let handle = watch::start(app, watch_args)?;
+    guard.handle = Some(handle);
+    Ok(())
+}
+
+#[tauri::command]
+pub fn stop_watch(state: State<'_, Mutex<WatchState>>) -> Result<()> {
+    state.lock().unwrap().handle.take(); // drop 即停止监听（RAII）
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_watch_status(state: State<'_, Mutex<WatchState>>) -> WatchStatus {
+    WatchStatus {
+        running: state.lock().unwrap().handle.is_some(),
+    }
+}
+
+/// 更新正在运行的监听任务的水印配置（不重启监听，输入/输出文件夹不可变更）。
+/// 前端在右侧面板改设置时实时调用，确保监听任务用的始终是当前配置，而非启动时的快照。
+#[derive(Debug, Deserialize)]
+pub struct UpdateWatchConfigArgs {
+    pub watermark_path: String,
+    pub config: WatermarkConfig,
+    #[serde(default)]
+    pub export_options: ExportOptions,
+    #[serde(default = "default_filename_template")]
+    pub filename_template: String,
+}
+
+#[tauri::command]
+pub fn update_watch_config(
+    state: State<'_, Mutex<WatchState>>,
+    args: UpdateWatchConfigArgs,
+) -> Result<()> {
+    args.config.validate()?;
+    let guard = state.lock().unwrap();
+    let handle = guard.handle.as_ref().ok_or_else(|| {
+        WatermarkError::InvalidParam("当前没有监听任务运行中".to_string())
+    })?;
+    let wm_bytes = std::fs::read(&args.watermark_path)?;
+    handle.update_live(watch::LiveConfig {
+        watermark_bytes: wm_bytes,
+        config: args.config,
+        export_options: args.export_options,
+        filename_template: args.filename_template,
+    });
+    Ok(())
 }

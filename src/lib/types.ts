@@ -34,6 +34,8 @@ export interface ExifTextConfig {
   opacity: number;
   color: [number, number, number];
   background: [number, number, number, number] | null;
+  /** 整行通栏：背景条宽度铺满整幅图片宽度（而非贴合文字宽度） */
+  full_width: boolean;
 }
 
 /** 全图平铺水印配置（防盗样片模式） */
@@ -99,6 +101,8 @@ export interface FrameConfig {
   font_size_ratio: number;
   /** 品牌名字号（相对参数条高度） */
   brand_size_ratio: number;
+  /** 是否在右块左侧绘制竖向分隔线（Canon 风参数条常见样式） */
+  show_divider: boolean;
 }
 
 export const DEFAULT_FRAME: FrameConfig = {
@@ -114,6 +118,7 @@ export const DEFAULT_FRAME: FrameConfig = {
   show_brand: true,
   font_size_ratio: 0.22,
   brand_size_ratio: 0.42,
+  show_divider: false,
 };
 
 export interface WatermarkConfig {
@@ -160,6 +165,7 @@ export const DEFAULT_EXIF_TEXT: ExifTextConfig = {
   opacity: 0.85,
   color: [255, 255, 255],
   background: [0, 0, 0, 80],
+  full_width: false,
 };
 
 export const DEFAULT_CONFIG: WatermarkConfig = {

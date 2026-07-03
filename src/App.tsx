@@ -1,15 +1,17 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Aperture,
   FolderOpen,
   ImagePlus,
   Play,
+  Radio,
   Settings2,
   SlidersHorizontal,
   Trash2,
   X,
 } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { join } from "@tauri-apps/api/path";
 import { DropZone } from "@/components/DropZone";
 import { FileList } from "@/components/FileList";
 import { PreviewCanvas } from "@/components/PreviewCanvas";
@@ -17,13 +19,21 @@ import { WatermarkPanel } from "@/components/WatermarkPanel";
 import { ExportSettings } from "@/components/ExportSettings";
 import { BatchProgressPanel } from "@/components/BatchProgress";
 import { PresetManager } from "@/components/PresetManager";
+import { WatchPanel, type WatchLogEntry } from "@/components/WatchPanel";
+import { cn, subscribeAsync } from "@/lib/utils";
 import {
   basename,
   createThumbnail,
   exportBatch,
   onBatchProgress,
+  onWatchFileProcessed,
+  onWatchFileStarted,
+  pickInputDir,
   pickOutputDir,
+  startWatch,
+  stopWatch,
   toPhotoFile,
+  updateWatchConfig,
   type BatchProgress,
   type BatchSummary,
   type Preset,
@@ -53,11 +63,95 @@ function App() {
   const [progress, setProgress] = useState<BatchProgress | null>(null);
   const [summary, setSummary] = useState<BatchSummary | null>(null);
 
+  // 左栏模式：手动选照片 / 监听文件夹
+  const [mode, setMode] = useState<"manual" | "watch">("manual");
+  const [watchInputDir, setWatchInputDir] = useState<string | null>(null);
+  // 监听模式的输出目录独立于顶部"批量导出"用的 outputDir（两种工作流不必绑定同一目标），
+  // 选定监听文件夹后自动默认为其下的 sign-output 子目录，用户可再手动改
+  const [watchOutputDir, setWatchOutputDir] = useState<string | null>(null);
+  const [watching, setWatching] = useState(false);
+  const [watchLog, setWatchLog] = useState<WatchLogEntry[]>([]);
+
   // 订阅 Rust 端进度事件
+  useEffect(
+    () => subscribeAsync(() => onBatchProgress((p) => setProgress(p))),
+    [],
+  );
+
+  // 订阅监听文件夹"开始处理"事件：先插入一条 processing 占位，给用户及时反馈
+  useEffect(
+    () =>
+      subscribeAsync(() =>
+        onWatchFileStarted(({ input }) => {
+          setWatchLog((prev) => [
+            {
+              id: `${Date.now()}-${Math.random()}`,
+              input,
+              output: null,
+              error: null,
+              status: "processing",
+              timestamp: Date.now(),
+            },
+            ...prev,
+          ]);
+        }),
+      ),
+    [],
+  );
+
+  // 订阅监听文件夹的处理结果事件：把对应的 processing 占位替换为最终结果
+  useEffect(
+    () =>
+      subscribeAsync(() =>
+        onWatchFileProcessed((r) => {
+          setWatchLog((prev) => {
+            const idx = prev.findIndex(
+              (e) => e.status === "processing" && e.input === r.input,
+            );
+            if (idx === -1) {
+              return [
+                {
+                  ...r,
+                  id: `${Date.now()}-${Math.random()}`,
+                  status: "done",
+                  timestamp: Date.now(),
+                },
+                ...prev,
+              ];
+            }
+            const next = [...prev];
+            next[idx] = { ...next[idx], ...r, status: "done", timestamp: Date.now() };
+            return next;
+          });
+        }),
+      ),
+    [],
+  );
+
+  // 监听中：右侧面板改水印设置时防抖同步到正在运行的监听任务，
+  // 避免"面板显示的设置"和"实际生效的设置"不一致（此前的设计缺陷）
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    onBatchProgress((p) => setProgress(p)).then((fn) => (unlisten = fn));
-    return () => unlisten?.();
+    if (!watching || !watermarkPath) return;
+    const timer = setTimeout(() => {
+      updateWatchConfig({
+        watermarkPath,
+        config,
+        exportOptions,
+        filenameTemplate,
+      }).catch(() => {
+        // 监听可能恰好被停止，静默忽略
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [watching, watermarkPath, config, exportOptions, filenameTemplate]);
+
+  // 组件卸载兜底：若还在监听则通知 Rust 停止（用 ref 避免每次 watching 变化都重新绑定卸载逻辑）
+  const watchingRef = useRef(watching);
+  watchingRef.current = watching;
+  useEffect(() => {
+    return () => {
+      if (watchingRef.current) stopWatch().catch(() => {});
+    };
   }, []);
 
   const addPhotos = useCallback((paths: string[]) => {
@@ -168,6 +262,56 @@ function App() {
     if (dir) setOutputDir(dir);
   };
 
+  const canStartWatch =
+    watchInputDir !== null &&
+    watchOutputDir !== null &&
+    watermarkPath !== null &&
+    !watching;
+
+  const handlePickWatchInputDir = async () => {
+    const dir = await pickInputDir();
+    if (!dir) return;
+    setWatchInputDir(dir);
+    // 默认输出到监听文件夹下的 sign-output 子目录（非递归监听不会把这个子目录里
+    // 新写入的文件当成"新输入"，不会造成循环处理），用户可在面板里再手动改
+    try {
+      setWatchOutputDir(await join(dir, "sign-output"));
+    } catch {
+      // 拼接失败（极少见）就留给用户手动选择输出目录
+    }
+  };
+
+  const handlePickWatchOutputDir = async () => {
+    const dir = await pickOutputDir();
+    if (dir) setWatchOutputDir(dir);
+  };
+
+  const handleStartWatch = async () => {
+    if (!canStartWatch || !watchInputDir || !watermarkPath || !watchOutputDir) return;
+    try {
+      await startWatch({
+        inputDir: watchInputDir,
+        outputDir: watchOutputDir,
+        watermarkPath,
+        config,
+        exportOptions,
+        filenameTemplate,
+      });
+      setWatchLog([]);
+      setWatching(true);
+    } catch (e) {
+      alert(`启动监听失败: ${e}`);
+    }
+  };
+
+  const handleStopWatch = async () => {
+    try {
+      await stopWatch();
+    } finally {
+      setWatching(false);
+    }
+  };
+
   return (
     <div className="dark flex h-screen flex-col bg-background text-foreground">
       {/* 顶部标题栏 */}
@@ -192,34 +336,65 @@ function App() {
             <SlidersHorizontal className="h-3.5 w-3.5" />
             设置
           </button>
-          <button
-            disabled={!canExport}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            onClick={handleExport}
-          >
-            <Play className="h-3.5 w-3.5" />
-            批量导出
-          </button>
+          {mode === "manual" && (
+            <button
+              disabled={!canExport}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={handleExport}
+            >
+              <Play className="h-3.5 w-3.5" />
+              批量导出
+            </button>
+          )}
         </div>
       </header>
 
       {/* 主体三栏 */}
       <div className="relative flex flex-1 min-h-0">
-        {/* 左栏：文件列表 */}
+        {/* 左栏：手动照片列表 / 监听文件夹 */}
         <aside className="flex w-64 shrink-0 flex-col border-r border-border/60 bg-card/20">
-          <div className="flex h-9 shrink-0 items-center justify-between border-b border-border/40 px-3">
-            <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-muted-foreground">
-              <ImagePlus className="h-3.5 w-3.5" />
-              照片
-              <span className="ml-1 rounded bg-muted px-1.5 py-0.5 text-[10px] font-normal normal-case tracking-normal">
-                {photos.length}
-              </span>
+          <div className="flex h-9 shrink-0 items-center border-b border-border/40 px-2">
+            <div className="flex rounded-md bg-muted/40 p-0.5">
+              <button
+                type="button"
+                onClick={() => setMode("manual")}
+                className={cn(
+                  "flex items-center gap-1 rounded-sm px-2 py-1 text-[11px] transition",
+                  mode === "manual"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <ImagePlus className="h-3 w-3" />
+                照片
+                {photos.length > 0 && (
+                  <span className="ml-0.5 rounded bg-muted px-1 text-[10px] font-normal">
+                    {photos.length}
+                  </span>
+                )}
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("watch")}
+                className={cn(
+                  "flex items-center gap-1 rounded-sm px-2 py-1 text-[11px] transition",
+                  mode === "watch"
+                    ? "bg-card text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground",
+                )}
+              >
+                <Radio className="h-3 w-3" />
+                监听文件夹
+                {watching && (
+                  <span className="ml-0.5 h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                )}
+              </button>
             </div>
-            {photos.length > 0 && (
+            {mode === "manual" && photos.length > 0 && (
               <button
                 type="button"
                 onClick={clearAllPhotos}
-                className="inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-destructive transition"
+                className="ml-auto inline-flex items-center gap-1 text-[11px] text-muted-foreground hover:text-destructive transition"
                 title="清空全部照片"
               >
                 <Trash2 className="h-3 w-3" />
@@ -227,15 +402,32 @@ function App() {
               </button>
             )}
           </div>
-          <div className="flex-1 overflow-y-auto p-3">
-            <DropZone onFiles={addPhotos} />
-            <FileList
-              photos={photos}
-              selectedIndex={selectedIndex}
-              onSelect={setSelectedIndex}
-              onRemove={removePhoto}
-            />
-          </div>
+          {mode === "manual" ? (
+            <div className="flex-1 overflow-y-auto p-3">
+              <DropZone onFiles={addPhotos} />
+              <FileList
+                photos={photos}
+                selectedIndex={selectedIndex}
+                onSelect={setSelectedIndex}
+                onRemove={removePhoto}
+              />
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto p-3">
+              <WatchPanel
+                inputDir={watchInputDir}
+                onPickInputDir={handlePickWatchInputDir}
+                outputDir={watchOutputDir}
+                onPickOutputDir={handlePickWatchOutputDir}
+                watermarkSelected={watermarkPath !== null}
+                watching={watching}
+                canStart={canStartWatch}
+                onStart={handleStartWatch}
+                onStop={handleStopWatch}
+                log={watchLog}
+              />
+            </div>
+          )}
         </aside>
 
         {/* 中栏：预览 */}

@@ -56,6 +56,9 @@ pub struct FrameConfig {
     /// 品牌名字号（相对参数条高度）
     #[serde(default = "default_brand_size_ratio")]
     pub brand_size_ratio: f32,
+    /// 是否在右块左侧绘制竖向分隔线（Canon 风参数条常见样式）
+    #[serde(default)]
+    pub show_divider: bool,
 }
 
 fn default_border_color() -> [u8; 3] {
@@ -110,6 +113,7 @@ impl Default for FrameConfig {
             show_brand: default_show_brand(),
             font_size_ratio: default_font_size_ratio(),
             brand_size_ratio: default_brand_size_ratio(),
+            show_divider: false,
         }
     }
 }
@@ -282,6 +286,26 @@ pub fn apply(
         draw_text_on_rgb(&mut canvas, line, right_x1 as f32, y, fs, color, font, TextAnchor::Right);
     }
 
+    // 竖向分隔线：画在右块左侧（Canon 风参数条常见样式）
+    if config.show_divider {
+        let max_right_w = right_texts
+            .iter()
+            .map(|l| measure_text_width(l, main_font_px, font))
+            .fold(0f32, f32::max);
+        let divider_thickness = ((bar_h as f32) * 0.02).max(1.0) as u32;
+        let divider_margin = (bar_h as f32 * 0.2).round() as u32;
+        // 上界减去 thickness，保证 divider_x + dx 始终落在画布内（即使 border=0）
+        let max_x = (new_w.saturating_sub(border).saturating_sub(divider_thickness)) as i64;
+        let divider_x = ((right_x1 as f32 - max_right_w - inner_pad as f32).round() as i64)
+            .clamp(border as i64, max_x.max(border as i64)) as u32;
+        let divider_color = Rgb(darken(config.border_color, 0.7));
+        for dx in 0..divider_thickness {
+            for y in (bar_top + divider_margin)..(bar_top + bar_h - divider_margin) {
+                canvas.put_pixel(divider_x + dx, y, divider_color);
+            }
+        }
+    }
+
     // 中央：品牌名，字号更大，垂直居中
     if !brand_text.trim().is_empty() {
         let cx = (bar_w / 2) as f32;
@@ -336,11 +360,7 @@ fn draw_text_on_rgb(
     let ascent = scaled_font.ascent();
 
     // 先测量文字宽度以处理对齐
-    let mut total_w = 0f32;
-    for c in text.chars() {
-        let gid = font.glyph_id(c);
-        total_w += scaled_font.h_advance(gid);
-    }
+    let total_w = measure_text_width(text, font_px, font);
     let start_x = match anchor {
         TextAnchor::Left => x,
         TextAnchor::Right => x - total_w,
@@ -382,6 +402,17 @@ fn draw_text_on_rgb(
         }
         x_cursor += scaled_font.h_advance(gid);
     }
+}
+
+/// 测量文字在给定字号下的总宽度（像素），供对齐与分隔线定位复用
+fn measure_text_width(text: &str, font_px: f32, font: &FontRef<'static>) -> f32 {
+    let scaled_font = font.as_scaled(PxScale::from(font_px));
+    let mut total_w = 0f32;
+    for c in text.chars() {
+        let gid = font.glyph_id(c);
+        total_w += scaled_font.h_advance(gid);
+    }
+    total_w
 }
 
 /// 把颜色按因子（0..1）压暗
@@ -495,6 +526,22 @@ mod tests {
         let out = apply(&photo, &config, &tags, font).unwrap();
         let p = out.get_pixel(0, 0);
         assert_eq!(p.0, [0, 0, 0]);
+    }
+
+    #[test]
+    fn apply_with_divider_does_not_panic() {
+        let photo = RgbImage::from_pixel(800, 600, Rgb([100, 100, 100]));
+        let tags = make_test_tags();
+        let font = get_font();
+        let config = FrameConfig {
+            enabled: true,
+            border_ratio: 0.0, // 无边框布局，验证 divider_x 不会越界
+            show_divider: true,
+            ..Default::default()
+        };
+        let out = apply(&photo, &config, &tags, font).unwrap();
+        assert_eq!(out.width(), photo.width(), "border_ratio=0 时宽度不变");
+        assert!(out.height() > photo.height(), "高度应扩大（含底部参数条）");
     }
 
     #[test]
